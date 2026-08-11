@@ -1,0 +1,11 @@
+{
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"types": ["node"],
+		// Config files export anonymous object literals from helper calls, which
+		// isolatedDeclarations cannot name. Public API in src/ keeps it on.
+		"isolatedDeclarations": false
+	},
+	"include": ["*.config.ts"]
+}

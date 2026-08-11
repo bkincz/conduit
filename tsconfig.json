@@ -1,0 +1,45 @@
+{
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"compilerOptions": {
+		"target": "ES2022",
+		"lib": ["ES2023", "DOM", "DOM.Iterable"],
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"jsx": "react-jsx",
+
+		"strict": true,
+		"noImplicitAny": true,
+		"strictNullChecks": true,
+		"strictFunctionTypes": true,
+		"strictBindCallApply": true,
+		"strictPropertyInitialization": true,
+		"noImplicitThis": true,
+		"noImplicitReturns": true,
+		"noFallthroughCasesInSwitch": true,
+		"noUncheckedIndexedAccess": true,
+		"exactOptionalPropertyTypes": true,
+		"noImplicitOverride": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"allowUnusedLabels": false,
+		"allowUnreachableCode": false,
+
+		"esModuleInterop": true,
+		"allowSyntheticDefaultImports": true,
+		"forceConsistentCasingInFileNames": true,
+		"skipLibCheck": true,
+		"resolveJsonModule": true,
+		// Keep ambient Node types out of a browser library; src/globals.d.ts
+		// declares the one global (process.env) conduit actually touches.
+		"types": [],
+		"isolatedModules": true,
+		"verbatimModuleSyntax": true,
+		"isolatedDeclarations": true,
+
+		"declaration": true,
+		"sourceMap": true,
+		"noEmit": true
+	},
+	"include": ["src"],
+	"exclude": ["dist", "node_modules", "coverage"]
+}

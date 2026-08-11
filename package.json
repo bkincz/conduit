@@ -1,0 +1,152 @@
+{
+	"name": "@bkincz/conduit",
+	"version": "0.0.0",
+	"description": "Data-fetching client for micro frontends: one shared client across every bundle on the page",
+	"type": "module",
+	"main": "./dist/index.cjs",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"require": "./dist/index.cjs"
+		},
+		"./react": {
+			"types": "./dist/react.d.ts",
+			"import": "./dist/react.js",
+			"require": "./dist/react.cjs"
+		},
+		"./devtools": {
+			"types": "./dist/devtools.d.ts",
+			"import": "./dist/devtools.js",
+			"require": "./dist/devtools.cjs"
+		},
+		"./testing": {
+			"types": "./dist/testing.d.ts",
+			"import": "./dist/testing.js",
+			"require": "./dist/testing.cjs"
+		},
+		"./package.json": "./package.json"
+	},
+	"sideEffects": false,
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"keywords": [
+		"micro-frontends",
+		"module-federation",
+		"fetch",
+		"http-client",
+		"cache",
+		"request-queue",
+		"deduplication",
+		"abort",
+		"typescript"
+	],
+	"author": "Benjamin Kinczel <beni.kinczel@gmail.com>",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/bkincz/conduit.git"
+	},
+	"bugs": {
+		"url": "https://github.com/bkincz/conduit/issues"
+	},
+	"homepage": "https://github.com/bkincz/conduit#readme",
+	"scripts": {
+		"build": "tsup",
+		"dev": "tsup --watch",
+		"type-check": "tsc --noEmit && tsc -p tsconfig.tools.json --noEmit",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+		"format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
+		"test": "vitest",
+		"test:run": "vitest run",
+		"test:coverage": "vitest run --coverage",
+		"bench": "vitest bench --run",
+		"size": "size-limit",
+		"verify": "pnpm run type-check && pnpm run lint && pnpm run test:coverage && pnpm run build && pnpm run size",
+		"prepublishOnly": "pnpm run verify"
+	},
+	"peerDependencies": {
+		"react": ">=18.0.0"
+	},
+	"peerDependenciesMeta": {
+		"react": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@eslint/js": "^9.39.1",
+		"@size-limit/preset-small-lib": "^11.2.0",
+		"@testing-library/react": "^16.3.2",
+		"@types/node": "^22.19.2",
+		"@types/react": "^19.2.2",
+		"@types/react-dom": "^19.2.4",
+		"@vitest/coverage-v8": "^3.2.4",
+		"eslint": "^9.39.1",
+		"globals": "^16.5.0",
+		"happy-dom": "^20.0.11",
+		"prettier": "^3.8.4",
+		"react": "^19.2.0",
+		"react-dom": "^19.2.8",
+		"size-limit": "^11.2.0",
+		"terser": "^5.44.1",
+		"tsup": "^8.5.1",
+		"typescript": "^5.9.3",
+		"typescript-eslint": "^8.47.1",
+		"vitest": "^3.2.4"
+	},
+	"size-limit": [
+		{
+			"name": "Full bundle",
+			"path": "dist/index.js",
+			"limit": "12 KB"
+		},
+		{
+			"name": "Core only",
+			"path": "dist/index.js",
+			"import": "{ createClient }",
+			"limit": "4.5 KB"
+		},
+		{
+			"name": "Core + common plugins",
+			"path": "dist/index.js",
+			"import": "{ createClient, sharedClient, cache, dedupe, retry, timeout, queue }",
+			"limit": "9 KB"
+		},
+		{
+			"name": "Errors only",
+			"path": "dist/index.js",
+			"import": "{ ConduitError, isConduitError }",
+			"limit": "1 KB"
+		},
+		{
+			"name": "React bindings",
+			"path": "dist/react.js",
+			"limit": "2 KB"
+		},
+		{
+			"name": "Devtools",
+			"path": "dist/devtools.js",
+			"limit": "2 KB"
+		},
+		{
+			"name": "Testing",
+			"path": "dist/testing.js",
+			"limit": "2 KB"
+		}
+	],
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
+	"engines": {
+		"node": ">=22.12.0"
+	},
+	"packageManager": "pnpm@11.6.0"
+}
