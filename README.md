@@ -1,20 +1,14 @@
-# @bkincz/conduit
+# conduit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 conduit is a data-fetching client for micro frontends. One client is shared by every bundle on the page, so four remotes asking for the same thing make one request, read one cache, and share one session. Sharing goes through a global registry rather than any framework's provider, so it works the same whichever framework each bundle is built with, and whether they match or not.
-
-Zero runtime dependencies. The core is plain TypeScript, with optional React bindings and a two-method store seam for everything else.
-
-> Pre-release and unpublished. Everything below works today.
 
 ## Install
 
 ```bash
 pnpm add @bkincz/conduit
 ```
-
-React is an optional peer dependency, only needed for `@bkincz/conduit/react`.
 
 ## Quick start
 
@@ -164,7 +158,7 @@ Each federated bundle gets its own module instance, so a client built in the hos
 
 ```ts
 export const api = sharedClient(
-	'acme.api',
+	'bkincz.api',
 	() => defaults(createClient({ baseUrl: '/api' })),
 	{ contract: 'v1', version: 1 } // warns when bundles disagree
 )
@@ -176,14 +170,14 @@ Tearing one down means deregistering it too, or the next bundle to ask gets the 
 
 ```ts
 api.destroy()
-releaseSharedClient('acme.api')
+releaseSharedClient('bkincz.api')
 ```
 
 ## React
 
 ```ts
 // api.ts
-export const api = sharedClient('acme.api', () =>
+export const api = sharedClient('bkincz.api', () =>
 	defaults(createClient({ baseUrl: '/api' }), { session: { adapter } })
 )
 
@@ -192,7 +186,10 @@ export const { useRequest, useMutation, usePrefetch, useSession } = createHooks(
 
 ```tsx
 function Profile({ id }: { id: string }) {
-	const { data, error, isLoading } = useRequest<User>('/users/:id', { params: { id } })
+	const { data, error, isLoading } = useRequest<User>('/users/:id', {
+		params: { id },
+		tags: ['users'],
+	})
 
 	if (isLoading) return <Spinner />
 	if (error) return <ErrorCard code={error.code} />
@@ -212,7 +209,63 @@ function Profile({ id }: { id: string }) {
 
 There is no provider. The hooks bind to a client at module scope, so every remote importing them shares it. Two components rendering the same query share one store and one request, and the second to mount renders what the first already fetched without a round trip. Unmounting cancels that component's interest only.
 
-`useMutation` gives you `mutate`, `data`, `error`, `isPending`, and `reset`. `usePrefetch` warms the cache in the prefetch lane. `useSession` returns your user type without a cast.
+The hook re-subscribes when the key changes, not when the options object does, so a fresh `params` object every render costs nothing. `enabled` is how one query waits on another:
+
+```tsx
+function Invoices() {
+	const { data: user } = useRequest<User>('/me')
+
+	const { data: invoices, isFetching } = useRequest<Invoice[]>('/users/:id/invoices', {
+		params: { id: user?.id ?? '' },
+		enabled: user !== undefined,
+	})
+
+	return <List rows={invoices ?? []} busy={isFetching} />
+}
+```
+
+`useMutation` takes the request to run rather than a path, so anything the client can do is fair game, including a scope, a lane, or two calls in one mutation. It returns `mutate`, `data`, `error`, `isPending`, and `reset`. `mutate` resolves to `undefined` on failure instead of rejecting, and the error lands in state.
+
+```tsx
+function NewUser() {
+	const { mutate, isPending, error } = useMutation<User, { name: string }>(variables =>
+		api.post<User>('/users', variables)
+	)
+
+	async function submit(name: string) {
+		const created = await mutate({ name })
+
+		if (created !== undefined) api.invalidateTag('users')
+	}
+
+	return <Form onSubmit={submit} busy={isPending} error={error?.message} />
+}
+```
+
+`usePrefetch` returns a function that warms the cache in the prefetch lane, so the queue serves it behind anything on screen. The row is already there when the click lands:
+
+```tsx
+function UserRow({ id }: { id: string }) {
+	const prefetch = usePrefetch()
+
+	return <Row onMouseEnter={() => prefetch('/users/:id', { params: { id } })} />
+}
+```
+
+`useSession` reads the page's one session, typed as your user rather than `unknown`:
+
+```tsx
+function Nav() {
+	const { status, session } = useSession()
+
+	if (status === 'unknown' || status === 'loading') return <Spinner />
+	if (status === 'anonymous') return <SignIn />
+
+	return <Avatar user={session!} />
+}
+```
+
+Every remote calling `useSession` follows the same state, so a 401 in one signs the whole page out at once.
 
 ## Any other framework
 
