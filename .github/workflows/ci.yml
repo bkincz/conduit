@@ -1,37 +1,158 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
 
 permissions:
-  contents: read
+    contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [22, 24]
+    test:
+        name: Test
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest]
+                node-version: [22, 24]
 
-    steps:
-      # TODO: pin these to commit SHAs before the repo goes public.
-      - uses: actions/checkout@v4
+        steps:
+            # TODO: pin these to commit SHAs before the repo goes public.
+            - name: Checkout
+              uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-          cache: pnpm
+            - name: Setup Node.js ${{ matrix.node-version }}
+              uses: actions/setup-node@v6
+              with:
+                  node-version: ${{ matrix.node-version }}
+                  cache: 'pnpm'
 
-      - run: pnpm install --frozen-lockfile
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
 
-      - run: pnpm run type-check
-      - run: pnpm run lint
-      - run: pnpm run format:check
-      - run: pnpm run test:coverage
-      - run: pnpm run build
-      - run: pnpm run size
+            - name: Type check
+              run: pnpm run type-check
+
+            - name: Lint
+              run: pnpm run lint
+
+            - name: Format check
+              run: pnpm run format:check
+
+            - name: Test (with coverage)
+              run: pnpm run test:coverage
+
+    build:
+        name: Build
+        runs-on: ubuntu-latest
+        needs: test
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v6
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: 24
+                  cache: 'pnpm'
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build
+              run: pnpm run build
+
+            - name: Size limit
+              run: pnpm run size
+
+            - name: Upload build artifacts
+              uses: actions/upload-artifact@v7
+              with:
+                  name: dist
+                  path: dist
+                  retention-days: 7
+
+    smoke:
+        name: Smoke (pack + resolve exports)
+        runs-on: ubuntu-latest
+        needs: test
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v6
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: 24
+                  cache: 'pnpm'
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build
+              run: pnpm run build
+
+            - name: Pack the tarball
+              run: pnpm pack --pack-destination "$RUNNER_TEMP"
+
+            - name: Install the tarball into a bare consumer
+              working-directory: ${{ runner.temp }}
+              run: |
+                  mkdir -p consumer && cd consumer
+                  npm init -y > /dev/null
+                  npm pkg set type=module
+                  npm install "$RUNNER_TEMP"/bkincz-conduit-*.tgz react
+
+            - name: Import every export, ESM and CJS
+              working-directory: ${{ runner.temp }}/consumer
+              run: |
+                  node --input-type=module -e '
+                    const { createClient, defaults } = await import("@bkincz/conduit")
+                    await import("@bkincz/conduit/react")
+                    await import("@bkincz/conduit/devtools")
+                    const { createMockServer } = await import("@bkincz/conduit/testing")
+                    const server = createMockServer({ baseUrl: "/api" })
+                    server.get("/ping", () => ({ ok: true }))
+                    const api = defaults(createClient({ baseUrl: "/api", fetch: server.fetch }))
+                    const body = await api.get("/ping")
+                    if (body.ok !== true) throw new Error("unexpected body: " + JSON.stringify(body))
+                  '
+                  node -e '
+                    require("@bkincz/conduit")
+                    require("@bkincz/conduit/react")
+                    require("@bkincz/conduit/devtools")
+                    require("@bkincz/conduit/testing")
+                  '
+
+            - name: Type-check against the tarball
+              working-directory: ${{ runner.temp }}/consumer
+              run: |
+                  npm install typescript@5 @types/react @types/node
+                  cat > index.ts <<'TS'
+                  import { createClient, defaults, type ConduitError } from '@bkincz/conduit'
+                  import { createHooks } from '@bkincz/conduit/react'
+                  import { attachDevtools } from '@bkincz/conduit/devtools'
+                  import { createMockServer } from '@bkincz/conduit/testing'
+
+                  const api = defaults(createClient({ baseUrl: '/api' }))
+                  const hooks = createHooks(api)
+                  const devtools = attachDevtools(api)
+                  const server = createMockServer({ baseUrl: '/api' })
+
+                  export type Exports = [typeof hooks.useRequest, typeof devtools.store, typeof server.calls, ConduitError]
+                  TS
+                  npx tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --jsx react-jsx index.ts
