@@ -1,172 +1,192 @@
 # @bkincz/conduit
 
-A data-fetching client for micro frontends. One client, shared by every bundle on the page,
-whatever loaded them.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> Status: pre-release, unpublished. Everything below works.
-> See [docs/plan.md](./docs/plan.md).
+conduit is a data-fetching client for micro frontends. One client is shared by every bundle on the page, so four remotes asking for the same thing make one request, read one cache, and share one session. Sharing goes through a global registry rather than any framework's provider, so it works the same whichever framework each bundle is built with, and whether they match or not.
 
-## Why
+Zero runtime dependencies. The core is plain TypeScript, with optional React bindings and a two-method store seam for everything else.
 
-Composed frontends break the assumption every mainstream client makes. React context does not
-cross a federation boundary, so a provider mounted by the host is invisible to a remote. Remotes
-mount and unmount on their own schedule. Four remotes talking to one backend means four caches,
-four session lookups, and four copies of the same in-flight request.
-
-conduit targets that shape directly:
-
-- **One client across bundles** — held on `globalThis`, not in a provider.
-- **Shared cache and single-flight** — a remote that mounts second pays nothing.
-- **One session recovery**, not one per remote — the failure that corrupts rotating-token backends.
-- **Abort scopes** tied to remote lifecycle, so unmounting cancels cleanly.
-- **Priority lanes**, so a chatty remote cannot starve the host's boot path.
-- **Contract guard**, because remotes deploy independently against one backend.
-
-Zero runtime dependencies. Framework-agnostic core, with optional React bindings.
+> Pre-release and unpublished. Everything below works today.
 
 ## Install
 
-```sh
+```bash
 pnpm add @bkincz/conduit
 ```
 
-## Use
+React is an optional peer dependency, only needed for `@bkincz/conduit/react`.
+
+## Quick start
 
 ```ts
-import { createClient } from '@bkincz/conduit'
+import { createClient, defaults } from '@bkincz/conduit'
 
-const api = createClient({
-	baseUrl: '/api',
-	headers: () => ({ 'x-tenant': currentTenant() }), // read per request, not frozen at construction
+export const api = defaults(createClient({ baseUrl: '/api' }), {
+	cache: { ttl: 30_000, staleWhileRevalidate: true },
 })
 
-// Resolves to the decoded body.
 const user = await api.get<User>('/users/:id', { params: { id: 7 } })
 
-// Or the whole response, or a result you do not have to catch.
-const { status } = await api.get<User>('/users/7').response()
-const { data, error } = await api.get<User>('/users/7').safe()
-
-await api.post('/users', { name: 'Ada' }) // JSON-encoded, content type set
+await api.post('/users', { name: 'Ada' })
 ```
 
-Cancellation is owned by whoever mounts the remote, not by the remote itself:
+`defaults()` installs the standard stack in the order the layers need to be in. Reach for `.with()` only when you want something it cannot express.
+
+```
+observable → cache → dedupe → session → retry → queue → timeout → transport
+```
+
+## Requests
+
+`get`, `head`, `delete`, `post`, `put`, `patch`, and `request` for anything else. Bodies that are not already a `BodyInit` are JSON encoded and the content type set to match.
+
+```ts
+const user = await api.get<User>('/users/7') // the decoded body
+const { status, headers } = await api.get<User>('/users/7').response()
+const { data, error } = await api.get<User>('/users/7').safe() // never throws
+```
+
+| Option        | Description                                                                  |
+| ------------- | ---------------------------------------------------------------------------- |
+| `params`      | Fills `:name` placeholders in the path                                       |
+| `query`       | Query values, arrays repeat the key                                          |
+| `body`        | JSON encoded unless it is already a `BodyInit`                               |
+| `headers`     | Per request headers, merged over the client's                                |
+| `signal`      | Your own `AbortSignal`                                                       |
+| `key`         | Override the derived cache key                                               |
+| `lane`        | `critical`, `default`, `prefetch`, or your own                               |
+| `owner`       | Who issued it, surfaced in devtools and on errors                            |
+| `tags`        | Group entries for `invalidateTag`                                            |
+| `parse`       | `auto`, `json`, `text`, `blob`, `arrayBuffer`, `formData`, `none`            |
+| `credentials` | Fetch credential mode                                                        |
+| `meta`        | Plugin scratch space, such as `{ timeout: 60_000 }` or `{ cache: 'bypass' }` |
+
+And on the client:
+
+| Option        | Description                                                    |
+| ------------- | -------------------------------------------------------------- |
+| `baseUrl`     | Prefixed to relative paths, absolute urls bypass it            |
+| `headers`     | An object, or a function read fresh on every request           |
+| `vary`        | Which headers count toward request identity, defaults to `'*'` |
+| `credentials` | Default credential mode                                        |
+| `owner`       | Default owner for this bundle                                  |
+| `lane`        | Default lane                                                   |
+| `parse`       | Default decode mode                                            |
+| `fetch`       | Swap the network implementation, for tests or instrumentation  |
+
+## Errors
+
+Everything rejects with a `ConduitError` carrying a `code`, plus `status`, `url`, `owner`, and the decoded `body` when there was one.
+
+```ts
+import { isErrorCode } from '@bkincz/conduit'
+
+const { data, error } = await api.get<User>('/users/7').safe()
+
+if (isErrorCode(error, 'TIMEOUT')) retryLater()
+```
+
+`HTTP_ERROR`, `NETWORK`, `TIMEOUT`, `ABORTED`, `PARSE`, `UNAUTHENTICATED`, `CONFIG`, `UNKNOWN`.
+
+## Cancelling
+
+A scope is a cancellation boundary with the full request surface. Hand one to a remote on mount and abort it on unmount, and nothing it started can outlive it.
 
 ```ts
 const scope = api.scope('remote:profile')
 
 scope.get('/settings')
-scope.abort() // on unmount — every request made through it stops
+scope.abort() // every request made through it stops
 ```
+
+## Request identity
+
+Entries are keyed on method, url, body, decode mode, and the headers `vary` selects. Headers count by default, because two remotes calling `/me` under different tokens must not share an entry.
+
+```ts
+createClient({ vary: '*' }) // default, every header
+createClient({ vary: ['authorization'] }) // only what changes the response
+createClient({ vary: [] }) // url alone
+```
+
+Narrow it if you send a header that is unique per request, like a trace id. Under `'*'` that gives every request its own key, so nothing hits the cache or shares a flight.
 
 ## Plugins
 
-Most setups want the standard stack, in the order the layers need to be in:
+Each one is middleware that can also extend the client, and the extension shows up in the type. `api.invalidate()` does not compile until `cache()` is installed.
+
+| Plugin       | Adds to the client                                       | What it does                                                                   |
+| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `cache`      | `invalidate`, `invalidateTag`, `clearCache`, `cacheSize` | LRU with TTL, optional stale-while-revalidate, tag invalidation                |
+| `dedupe`     | `inFlight`                                               | One request per key. Unmounting cancels your wait, not everyone else's         |
+| `session`    | `session`                                                | One session for the page, single-flight recovery, behind an adapter            |
+| `retry`      |                                                          | Backoff with jitter, honours `Retry-After`, idempotent methods only by default |
+| `queue`      | `queueDepth`, `activeRequests`                           | Bounded concurrency with priority lanes                                        |
+| `timeout`    |                                                          | Per client or per request, fails with code `TIMEOUT`                           |
+| `observable` | `observe`, `observedKeys`                                | Per key state for framework bindings                                           |
+| `contract`   |                                                          | Reports once when this bundle and the API disagree on version                  |
+
+Any request can step around a layer:
 
 ```ts
-const api = defaults(createClient({ baseUrl: '/api' }), {
-	cache: { ttl: 30_000, staleWhileRevalidate: true },
-	session: { adapter: mySessionAdapter },
-})
+api.get('/live', { meta: { cache: 'bypass', dedupe: 'bypass' } })
+api.get('/slow', { meta: { timeout: 60_000 } })
+api.get('/urgent', { meta: { queue: 'bypass' } })
 ```
 
-```
-cache → dedupe → session → retry → queue → timeout → transport
-```
+Cached and shared bodies are frozen, since every reader holds the same object.
 
-Order is load-bearing and outermost-first. Cache first, so a hit costs a map lookup and never
-builds headers or composes a signal. Session inside it but outside retry, so a served hit waits on
-nothing while a recovery replays a request that has already spent its attempts. Queue inside retry,
-so a replay rejoins the queue instead of jumping it. Timeout innermost, so its clock covers one
-network attempt rather than a whole retry sequence.
+## Session
 
-Getting that order wrong is subtle and expensive, which is why `defaults()` exists. Compose
-`.with()` by hand when you need something it cannot express.
-
-**`cache`** — LRU with TTL, optional stale-while-revalidate, and tag invalidation
-(`api.invalidateTag('user')`). Cached data is frozen: it is handed to every reader by reference, so
-a mutation would corrupt what another remote already holds.
-
-**`dedupe`** — one request per key, however many callers ask. Cancellation is reference-counted, so
-a remote unmounting mid-flight cancels its own wait without taking the response away from the
-remote still on screen.
-
-**`retry`** — exponential backoff with full jitter, honours `Retry-After`, idempotent-only by
-default, and stops waiting out a backoff the moment the request is cancelled.
-
-**`timeout`** — per-client or per-request (`{ meta: { timeout: 60_000 } }`). Fails with code
-`TIMEOUT`, not a generic abort.
-
-**`queue`** — bounded concurrency with priority lanes (`critical`, `default`, `prefetch`) and
-optional per-lane ceilings. A composed frontend has no single owner of request volume; without a
-scheduler the host's boot path queues behind a remote's speculative prefetching, down in the
-browser's connection pool where nothing can reorder it.
-
-**`session`** — one session for every bundle on the page, behind an adapter so conduit knows
-nothing about your auth provider:
+conduit owns the hard parts, the adapter owns whatever is specific to your backend. A cookie backend implements `load` and nothing else. A token backend adds `authorize` and `renew`.
 
 ```ts
 const adapter: SessionAdapter<User> = {
 	load: async ctx => (await ctx.request<{ user: User | null }>('/auth/session')).user,
+	authorize: (request, user) =>
+		user === null ? request : withRequest(request, { headers: bearer(user) }),
+	renew: async ctx => (await ctx.request('/auth/refresh').safe()).error === null,
+	expiresAt: user => user.exp * 1000,
 }
+
+const api = defaults(createClient({ baseUrl: '/api' }), { session: { adapter } })
+
+api.session.get() // { status, session, error, updatedAt }
+api.session.subscribe(state => render(state))
+await api.session.load()
 ```
 
-A cookie backend implements `load` and nothing else. A token backend adds `authorize` and `renew`.
-Recovery is single-flight and the terminal handoff runs exactly once — the failure this exists to
-prevent is four remotes hitting 401 together, four concurrent recoveries, and a backend that
-rotates refresh tokens signing the user out for having too many panels open. Without `renew`,
-unauthenticated is terminal: everything in flight is aborted, then `onUnauthenticated` fires once.
-
-**`contract`** — remotes deploy on their own schedule against one backend. Compares a response
-header against what this bundle was built for, and reports once per server version.
-
-## Request identity
-
-Cache entries and deduped flights are keyed on method, URL, body, **headers and credential mode**.
-Headers count by default because one client is shared across bundles: two remotes calling `/me`
-under different tokens must not collide, and that collision would be a cross-account leak rather
-than a cache miss.
-
-```ts
-createClient({ vary: '*' }) // default — every header
-createClient({ vary: ['authorization'] }) // only what changes the response
-createClient({ vary: [] }) // URL alone
-```
-
-Narrow it if you attach a header that is unique per request, such as a trace id — under `'*'` that
-makes every key unique, so nothing ever hits the cache or shares a flight.
+Four remotes hitting a 401 together produce one recovery, not four. When it cannot be recovered, everything in flight is aborted, cached responses are dropped, and `onUnauthenticated` fires once.
 
 ## One client across bundles
 
-Under module federation each bundle gets its own module instance, so a client built in the host is
-invisible to a remote — and context cannot bridge them. A global registry can:
+Each federated bundle gets its own module instance, so a client built in the host is invisible to a remote. A global registry fixes that.
 
 ```ts
 export const api = sharedClient(
-	'mmw.api',
-	() => createClient({ baseUrl: '/api' }),
+	'acme.api',
+	() => defaults(createClient({ baseUrl: '/api' })),
 	{ contract: 'v1', version: 1 } // warns when bundles disagree
 )
 ```
 
-The first caller builds it; everyone else gets that same instance, so the cache, the in-flight table
-and the session are genuinely shared. A later caller's factory never runs — which is why `contract`
-and `version` exist, to tell you about a skew rather than let you find it through a wrong response.
+The first caller builds it and everyone else gets that same instance. A later caller's factory never runs, which is what `contract` and `version` are there to warn you about.
 
-If you tear a shared client down, deregister it too, or the next bundle to ask gets the dead one:
+Tearing one down means deregistering it too, or the next bundle to ask gets the dead one:
 
 ```ts
-client.destroy()
-releaseSharedClient('mmw.api')
+api.destroy()
+releaseSharedClient('acme.api')
 ```
 
 ## React
 
 ```ts
 // api.ts
-export const api = sharedClient('mmw.api', () =>
+export const api = sharedClient('acme.api', () =>
 	defaults(createClient({ baseUrl: '/api' }), { session: { adapter } })
 )
+
 export const { useRequest, useMutation, usePrefetch, useSession } = createHooks(api)
 ```
 
@@ -175,87 +195,45 @@ function Profile({ id }: { id: string }) {
 	const { data, error, isLoading } = useRequest<User>('/users/:id', { params: { id } })
 
 	if (isLoading) return <Spinner />
-	if (error) return <Error code={error.code} />
+	if (error) return <ErrorCard code={error.code} />
 
 	return <Card user={data!} />
 }
 ```
 
-No provider — the hooks are bound to a client at module scope instead. A `QueryClientProvider`
-mounted by the host would be invisible to a remote, so the pattern would look right and quietly
-give every remote its own cache. Binding at module scope means each remote shares the client the
-same way it shares everything else. The session type flows through, so `useSession()` returns your
-user type without a cast.
+| Field                     | Description                                           |
+| ------------------------- | ----------------------------------------------------- |
+| `data`, `error`, `status` | The current state of this query                       |
+| `isLoading`               | Nothing on screen yet and a request is in the air     |
+| `isFetching`              | A request is in the air, with or without data showing |
+| `isStale`                 | The last answer came from cache                       |
+| `refetch()`               | Run it again                                          |
+| `enabled: false`          | Hold off until a dependency is ready                  |
 
-Unmounting cancels that component's interest, not everyone's: dedupe counts participants, so a
-sibling rendering the same query keeps the underlying request alive.
+There is no provider. The hooks bind to a client at module scope, so every remote importing them shares it. Two components rendering the same query share one store and one request, and the second to mount renders what the first already fetched without a round trip. Unmounting cancels that component's interest only.
 
-For other frameworks, everything observable is a two-method store:
+`useMutation` gives you `mutate`, `data`, `error`, `isPending`, and `reset`. `usePrefetch` warms the cache in the prefetch lane. `useSession` returns your user type without a cast.
+
+## Any other framework
+
+Everything observable is a two-method store, so a binding is a few lines rather than a port. Svelte reads it as-is, Vue wraps it in `shallowRef`, Solid in `createStore`.
 
 ```ts
-interface ReadableStore<T> {
-	get(): T
-	subscribe(listener: (value: T) => void): () => void
-}
+const store = api.observe<User>(api.keyFor('/users/1'))
 
-api.observe<User>(api.keyFor('/users/1')) // → ReadableStore<QueryState<User>>
+store.get() // { status, data, error, from, fetching, updatedAt }
+store.subscribe(render)
 ```
 
-Notifications are batched onto a microtask, so one request settling is one render across every
-remote watching it rather than three.
+## Events and devtools
 
-## Observing
-
-One shared client sees traffic from every remote on the page, which is what makes "who issued this"
-answerable:
+One shared client sees traffic from every remote on the page, which is what makes "who issued this" answerable. Cache, dedupe, retry, queue, session, and contract publish here too, and nothing is emitted while nothing is listening.
 
 ```ts
 api.events.on('request:error', ({ request, error }) => {
 	Sentry.addBreadcrumb({ category: 'conduit', message: `${request.owner} → ${error.code}` })
 })
 ```
-
-Errors carry `owner` directly too, since under federation every remote shares one stack trace.
-Nothing subscribes by default, and emission is skipped entirely when nothing does.
-
-Plugins are middleware that can also extend the client, and the extension shows up in the type:
-
-```ts
-const client = createClient({ baseUrl: '/api' }).with({
-	name: 'log',
-	middleware: async (request, next) => {
-		const response = await next(request)
-		console.log(request.key, response.status)
-		return response
-	},
-})
-```
-
-## Testing
-
-`@bkincz/conduit/testing` mocks at the transport, so everything above it — cache, dedupe, retry,
-the queue, session recovery — runs for real. A mock installed higher up would be testing the mock.
-
-```ts
-import { createMockServer, status, networkError } from '@bkincz/conduit/testing'
-
-const server = createMockServer({ baseUrl: '/api' })
-
-server.get('/users/:id', request => ({ id: request.params.id }))
-server.post('/users', status(201, { id: 2 }))
-server.get('/flaky', status(503), { times: 1 }) // fails once, then falls through
-server.get('/down', networkError())
-
-const api = defaults(createClient({ baseUrl: '/api', fetch: server.fetch }))
-```
-
-An unmatched request fails at the request, naming what _is_ registered — a silent 404 would surface
-as an assertion failure somewhere else entirely.
-
-## Devtools
-
-`@bkincz/conduit/devtools` reads the event stream and nothing else, so it needs no cooperation from
-the plugins and cannot reach a production bundle by accident.
 
 ```ts
 import { attachDevtools } from '@bkincz/conduit/devtools'
@@ -264,9 +242,27 @@ const devtools = attachDevtools(api)
 devtools.store.subscribe(render) // entries, inFlight, counters, session
 ```
 
-Because the client is shared, this sees traffic from every remote on the page at once, attributed
-by owner — the view a composed frontend has no other way to get. It also hangs itself on
-`globalThis.__CONDUIT_DEVTOOLS__` for console poking; pass `expose: false` to opt out.
+Devtools read that stream and nothing else. The handle also lands on `globalThis.__CONDUIT_DEVTOOLS__` for console poking, so pass `expose: false` to opt out.
+
+## Testing
+
+`@bkincz/conduit/testing` mocks at the transport, so cache, dedupe, retry, the queue, and session recovery all run for real.
+
+```ts
+import { createMockServer, status, networkError, delay } from '@bkincz/conduit/testing'
+
+const server = createMockServer({ baseUrl: '/api' })
+
+server.get('/users/:id', request => ({ id: request.params.id }))
+server.post('/users', status(201, { id: 2 }))
+server.get('/flaky', status(503), { times: 1 }) // fails once, then falls through
+server.get('/slow', delay(500, { ok: true }))
+server.get('/down', networkError())
+
+const api = defaults(createClient({ baseUrl: '/api', fetch: server.fetch }))
+```
+
+Unmatched requests fail where they were made and name what is registered. `server.calls` has everything that arrived, and `server.reset()` clears routes and calls.
 
 ## License
 

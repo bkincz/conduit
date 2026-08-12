@@ -1,8 +1,8 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createClient } from '../core'
-import { defaults } from '../defaults'
+import { createClient } from '../client/core'
+import { defaults } from '../client/defaults'
 import { createHooks } from '../react'
 import { deferredFetch, jsonResponse, stubFetch } from './helpers'
 
@@ -12,9 +12,6 @@ afterEach(() => {
 	cleanup()
 })
 
-/*
- *   USE REQUEST
- ***************************************************************************************************/
 describe('useRequest', () => {
 	it('loads, then reports what it got', async () => {
 		const api = defaults(createClient({ fetch: stubFetch(ok).fetch }))
@@ -92,13 +89,70 @@ describe('useRequest', () => {
 
 		await waitFor(() => expect(stub.calls).toHaveLength(1))
 
-		// Same id, brand new options object every render.
 		rerender({ id: 1 })
 		rerender({ id: 1 })
 		expect(stub.calls).toHaveLength(1)
 
 		rerender({ id: 2 })
 		await waitFor(() => expect(stub.calls).toHaveLength(2))
+	})
+
+	it('issues its request under the key it subscribed to', async () => {
+		const api = defaults(createClient({ fetch: stubFetch(ok).fetch }))
+		const { useRequest } = createHooks(api)
+
+		const observed: string[] = []
+		const issued: (string | undefined)[] = []
+		const observe = api.observe.bind(api)
+		const request = api.request.bind(api)
+
+		vi.spyOn(api, 'observe').mockImplementation(key => {
+			observed.push(key)
+			return observe(key)
+		})
+		vi.spyOn(api, 'request').mockImplementation((path, options) => {
+			issued.push(options?.key)
+			return request(path, options)
+		})
+
+		renderHook(() => useRequest('/me'))
+
+		await waitFor(() => expect(issued).toHaveLength(1))
+
+		expect(issued[0]).toBe(observed[0])
+	})
+
+	it('says so when the client names the same query two different things', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+		let nonce = 0
+		const api = defaults(
+			createClient({
+				fetch: stubFetch(ok).fetch,
+				headers: () => ({ 'x-request-id': String(++nonce) }),
+			})
+		)
+		const { useRequest } = createHooks(api)
+
+		renderHook(() => useRequest('/me'))
+
+		await waitFor(() => expect(warn).toHaveBeenCalled())
+		expect(warn.mock.calls[0]?.[0]).toMatch(/derived two different keys/)
+	})
+
+	it('stays quiet for a header source that answers the same way twice', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const api = defaults(
+			createClient({
+				fetch: stubFetch(ok).fetch,
+				headers: () => ({ authorization: 'Bearer steady' }),
+			})
+		)
+		const { useRequest } = createHooks(api)
+
+		const { result } = renderHook(() => useRequest<{ id: number }>('/me'))
+
+		await waitFor(() => expect(result.current.data).toEqual({ id: 1 }))
+		expect(warn).not.toHaveBeenCalled()
 	})
 
 	it('refetches on demand', async () => {
@@ -161,9 +215,6 @@ describe('useRequest', () => {
 	})
 })
 
-/*
- *   USE MUTATION
- ***************************************************************************************************/
 describe('useMutation', () => {
 	it('runs, reports pending, then reports the result', async () => {
 		const api = defaults(createClient({ fetch: stubFetch(ok).fetch }))
@@ -220,9 +271,6 @@ describe('useMutation', () => {
 	})
 })
 
-/*
- *   USE PREFETCH
- ***************************************************************************************************/
 describe('usePrefetch', () => {
 	it('warms the cache in the prefetch lane', async () => {
 		const stub = stubFetch(ok)
@@ -241,15 +289,11 @@ describe('usePrefetch', () => {
 		await waitFor(() => expect(stub.calls).toHaveLength(1))
 		expect(lanes).toEqual(['prefetch'])
 
-		// The route it warmed now renders without a second request.
 		await api.get('/me')
 		expect(stub.calls).toHaveLength(1)
 	})
 })
 
-/*
- *   USE SESSION
- ***************************************************************************************************/
 describe('useSession', () => {
 	it('follows the shared session', async () => {
 		const api = defaults(createClient({ fetch: stubFetch(ok).fetch }), {

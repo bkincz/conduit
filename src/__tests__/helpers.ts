@@ -1,8 +1,5 @@
-import type { FetchLike } from '../types'
+import type { FetchLike } from '../primitives/types'
 
-/*
- *   STUB FETCH
- ***************************************************************************************************/
 export interface FetchCall {
 	url: string
 	init: RequestInit
@@ -25,7 +22,6 @@ export function stubFetch(handler: (call: FetchCall) => Response | Promise<Respo
 	}
 }
 
-/** A request that only settles when its signal aborts — stands in for a slow server. */
 export function hangingFetch(): FetchStub {
 	return stubFetch(
 		({ init }) =>
@@ -42,14 +38,11 @@ export function hangingFetch(): FetchStub {
 export interface DeferredFetch {
 	fetch: FetchLike
 	calls: FetchCall[]
-	/** Settles whichever request is currently outstanding. */
 	resolve(response: Response): void
 	reject(error: unknown): void
-	/** Whether the underlying request was cancelled. */
 	aborted(): boolean
 }
 
-/** A request the test settles by hand, so timing is explicit rather than raced. */
 export function deferredFetch(): DeferredFetch {
 	const calls: FetchCall[] = []
 	let outstanding:
@@ -76,9 +69,6 @@ export function deferredFetch(): DeferredFetch {
 	}
 }
 
-/*
- *   RESPONSES
- ***************************************************************************************************/
 export function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
 		status,

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
-import type { Client } from './core'
-import type { ConduitError } from './errors'
+import type { Client } from './client/core'
+import { DEV } from './primitives/dev'
+import type { ConduitError } from './primitives/errors'
 import type { ObservableApi, QueryState, QueryStatus } from './plugins/observable'
 import type { SessionApi, SessionState } from './plugins/session'
-import type { MethodOptions, RequestOptions } from './types'
+import type { MethodOptions, RequestOptions } from './primitives/types'
 
 /*
  *   TYPES
@@ -18,11 +19,11 @@ export interface UseRequestResult<T> {
 	data: T | undefined
 	error: ConduitError | undefined
 	status: QueryStatus
-	/** No data yet, and a request is in the air. The spinner case. */
+	/** No data yet and a request is in the air. */
 	isLoading: boolean
-	/** A request is in the air, whether or not something is already on screen. */
+	/** A request is in the air, with or without data on screen. */
 	isFetching: boolean
-	/** The last answer came from cache, so it may be behind the server. */
+	/** The last answer came from cache. */
 	isStale: boolean
 	refetch(): Promise<void>
 }
@@ -36,6 +37,14 @@ export interface UseMutationResult<T, V> {
 }
 
 export interface Hooks {
+	/**
+	 * Runs a request and renders its state, keyed the way the cache and dedupe
+	 * key it.
+	 *
+	 * A client `headers` function that answers differently per call gives every
+	 * render a different key under `vary: '*'`, and this refetches on each one.
+	 * Development warns when that happens.
+	 */
 	useRequest<T = unknown>(path: string, options?: UseRequestOptions): UseRequestResult<T>
 	useMutation<T = unknown, V = void>(
 		run: (variables: V) => PromiseLike<T>
@@ -52,20 +61,12 @@ export interface SessionHooks<S> {
  *   FACTORY
  ***************************************************************************************************/
 /**
- * Binds the hooks to one client.
- *
- * There is no provider, deliberately. React context does not cross a federation
- * boundary, so a provider mounted by the host is invisible to a remote — the
- * pattern would look right and silently give each remote its own everything.
- * Binding at the module level instead means every remote that imports this
- * module shares the client the way it shares the cache.
+ * Binds the hooks to one client, at module scope rather than through a
+ * provider. Context does not cross a federation boundary; a shared client does.
  *
  * ```ts
  * export const { useRequest, useSession } = createHooks(api)
  * ```
- *
- * The session type flows through, so `useSession()` returns your user type
- * without a cast.
  */
 export function createHooks<S>(
 	client: Client & ObservableApi & SessionApi<S>
@@ -80,21 +81,26 @@ export function createHooks(
 	function useRequest<T>(path: string, options: UseRequestOptions = {}): UseRequestResult<T> {
 		const { enabled = true, ...request } = options
 
-		// A string, so it stays stable across the new options object every render
-		// produces. This is the dependency everything else keys off.
 		const key = client.keyFor(path, request)
+
+		const checked = useRef(false)
+
+		if (DEV && !checked.current) {
+			checked.current = true
+
+			if (client.keyFor(path, request) !== key) {
+				console.warn(
+					`[conduit] useRequest("${path}") derived two different keys in one render, so the client's headers function answers differently per call — a rotating token, a request id, a trace parent. Under vary: '*' that makes every request unique: nothing hits the cache, nothing shares a flight, and this hook refetches on every render. Narrow vary to the headers that matter (vary: ['authorization']), or keep per-call headers out of the client's headers function.`
+				)
+			}
+		}
 
 		const store = useMemo(() => client.observe<T>(key), [key])
 		const state = useSyncExternalStore(store.subscribe, store.get, store.get)
 
-		// Read at call time rather than captured, so a changed header or tag is
-		// picked up without making the effect re-run on object identity.
 		const latest = useRef<RequestOptions>(request)
 		latest.current = request
 
-		// Held in a ref rather than created during render: a scope or a controller
-		// built in the render body leaks a second one under StrictMode's double
-		// invocation.
 		const inFlight = useRef<AbortController | undefined>(undefined)
 
 		const refetch = useCallback(async (): Promise<void> => {
@@ -103,9 +109,13 @@ export function createHooks(
 			const controller = new AbortController()
 			inFlight.current = controller
 
-			await client.request<T>(path, { ...latest.current, signal: controller.signal }).safe()
-			// `key` is what `path` and the options collapse into, so it is the real
-			// dependency; the options object itself is new on every render.
+			await client
+				.request<T>(path, {
+					...latest.current,
+					key,
+					signal: controller.signal,
+				})
+				.safe()
 		}, [key, path])
 
 		useEffect(() => {
@@ -115,9 +125,6 @@ export function createHooks(
 
 			void refetch()
 
-			// Unmounting cancels this component's interest, not everyone's: dedupe
-			// counts participants, so a sibling rendering the same query keeps the
-			// underlying request alive.
 			return () => inFlight.current?.abort()
 		}, [refetch, enabled])
 
@@ -166,9 +173,6 @@ export function createHooks(
 
 				return data
 			} catch (cause) {
-				// Surfaced as state rather than rethrown: a mutation that fails
-				// after its component unmounted would otherwise become an unhandled
-				// rejection nobody can catch.
 				const error = cause as ConduitError
 
 				if (alive.current) {
@@ -191,8 +195,6 @@ export function createHooks(
 	 */
 	function usePrefetch(): (path: string, options?: MethodOptions) => void {
 		return useCallback((path: string, options?: MethodOptions) => {
-			// Lane, not urgency: warming a route the user has only hovered must not
-			// crowd out what is already on screen.
 			void client.get(path, { ...options, lane: options?.lane ?? 'prefetch' }).safe()
 		}, [])
 	}

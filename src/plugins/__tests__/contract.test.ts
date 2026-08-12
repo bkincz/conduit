@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createClient } from '../../core'
+import { createClient } from '../../client/core'
 import { stubFetch } from '../../__tests__/helpers'
 import { contract, type ContractMismatch } from '../contract'
 

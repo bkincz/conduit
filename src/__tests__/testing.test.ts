@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { createClient } from '../core'
-import { defaults } from '../defaults'
+import { createClient } from '../client/core'
+import { defaults } from '../client/defaults'
 import { createMockServer, delay, json, networkError, status, text } from '../testing'
 
 describe('createMockServer', () => {
@@ -161,9 +161,6 @@ describe('createMockServer', () => {
 		expect((await api.get('/me').safe()).error?.message).toMatch(/No route/)
 	})
 
-	/*
-	 * The point of mocking at the transport: everything above it runs for real.
-	 */
 	it('leaves the whole pipeline in play', async () => {
 		const server = createMockServer()
 		server.get('/me', { id: 1 })
@@ -173,7 +170,6 @@ describe('createMockServer', () => {
 		await Promise.all([api.get('/me'), api.get('/me')])
 		await api.get('/me')
 
-		// One shared flight, then a cache hit — neither reached the server.
 		expect(server.calls).toHaveLength(1)
 	})
 })

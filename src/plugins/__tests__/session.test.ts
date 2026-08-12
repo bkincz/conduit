@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createClient } from '../../core'
-import { withRequest } from '../../request'
+import { createClient } from '../../client/core'
+import { withRequest } from '../../http/request'
 import { jsonResponse, stubFetch } from '../../__tests__/helpers'
 import { session, type SessionAdapter } from '../session'
 
@@ -11,16 +11,12 @@ interface User {
 
 const ok = (): Response => jsonResponse({ ok: true })
 
-/** A cookie-style adapter: it reads a session and owns nothing else. */
 function readOnlyAdapter(load: () => Promise<User | null>): SessionAdapter<User> {
 	return { load }
 }
 
 const settle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0))
 
-/*
- *   LOADING
- ***************************************************************************************************/
 describe('session loading', () => {
 	it('starts out knowing nothing, rather than guessing', () => {
 		const client = createClient({ fetch: stubFetch(ok).fetch }).with(
@@ -139,9 +135,6 @@ describe('session loading', () => {
 	})
 })
 
-/*
- *   TERMINAL
- ***************************************************************************************************/
 describe('unrecoverable sessions', () => {
 	it('hands over once, however many requests fail together', async () => {
 		const onUnauthenticated = vi.fn()
@@ -200,8 +193,6 @@ describe('unrecoverable sessions', () => {
 
 		await client.get('/a').safe()
 
-		// A 403 is usually "you may not", not "who are you" — signing the user out
-		// for one would be worse than the failure itself.
 		expect(onUnauthenticated).not.toHaveBeenCalled()
 	})
 
@@ -225,9 +216,6 @@ describe('unrecoverable sessions', () => {
 	})
 })
 
-/*
- *   RECOVERY
- ***************************************************************************************************/
 describe('recoverable sessions', () => {
 	it('recovers once and replays what failed', async () => {
 		let authorised = false
@@ -269,8 +257,6 @@ describe('recoverable sessions', () => {
 			client.get('/c').safe(),
 		])
 
-		// The failure that rotating-token backends punish: four remotes, four
-		// concurrent recoveries, three of them invalidated.
 		expect(renew).toHaveBeenCalledOnce()
 		expect(results.every(result => result.error === null)).toBe(true)
 	})
@@ -305,9 +291,6 @@ describe('recoverable sessions', () => {
 	})
 })
 
-/*
- *   AUTHORIZE
- ***************************************************************************************************/
 describe('authorized requests', () => {
 	it('attaches credentials and waits for the session to be known first', async () => {
 		const stub = stubFetch(ok)
@@ -346,9 +329,6 @@ describe('authorized requests', () => {
 	})
 })
 
-/*
- *   EVENTS
- ***************************************************************************************************/
 describe('session events', () => {
 	it('reports each transition', async () => {
 		const client = createClient({ fetch: stubFetch(ok).fetch }).with(

@@ -1,17 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { createClient } from '../../core'
+import { createClient } from '../../client/core'
 import { jsonResponse, stubFetch, type FetchCall } from '../../__tests__/helpers'
 import { queue } from '../queue'
-import type { FetchLike } from '../../types'
+import type { FetchLike } from '../../primitives/types'
 
-/*
- *   GATED FETCH
- ***************************************************************************************************/
 interface GatedFetch {
 	fetch: FetchLike
 	calls: FetchCall[]
-	/** Settles the request that started at `index`. */
 	release(index: number): void
 	releaseAll(): void
 }
@@ -40,9 +36,6 @@ function gatedFetch(): GatedFetch {
 
 const settle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0))
 
-/*
- *   CONCURRENCY
- ***************************************************************************************************/
 describe('queue', () => {
 	it('holds requests past the concurrency limit', async () => {
 		const gated = gatedFetch()
@@ -80,9 +73,6 @@ describe('queue', () => {
 		expect(client.queueDepth()).toBe(0)
 	})
 
-	/*
-	 * Lanes
-	 */
 	it('lets the host boot path overtake a remote prefetching', async () => {
 		const gated = gatedFetch()
 		const client = createClient({ fetch: gated.fetch }).with(queue({ concurrency: 1 }))
@@ -100,7 +90,6 @@ describe('queue', () => {
 		gated.release(0)
 		await settle()
 
-		// Queued last, ran first.
 		expect(gated.calls.map(call => call.url)).toEqual(['/occupier', '/boot'])
 
 		for (let round = 0; round < 4; round++) {
@@ -176,9 +165,6 @@ describe('queue', () => {
 		await Promise.all(pending)
 	})
 
-	/*
-	 * Cancellation
-	 */
 	it('drops a queued request when its caller cancels, without spending a slot', async () => {
 		const gated = gatedFetch()
 		const client = createClient({ fetch: gated.fetch }).with(queue({ concurrency: 1 }))
@@ -226,9 +212,6 @@ describe('queue', () => {
 		expect(client.activeRequests()).toBe(0)
 	})
 
-	/*
-	 * Escape hatch
-	 */
 	it('lets a request skip the queue entirely', async () => {
 		const gated = gatedFetch()
 		const client = createClient({ fetch: gated.fetch }).with(queue({ concurrency: 1 }))
@@ -246,9 +229,6 @@ describe('queue', () => {
 		await Promise.all(pending)
 	})
 
-	/*
-	 * Events
-	 */
 	it('reports a request having to wait', async () => {
 		const gated = gatedFetch()
 		const client = createClient({ fetch: gated.fetch }).with(queue({ concurrency: 1 }))

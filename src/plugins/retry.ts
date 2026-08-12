@@ -1,7 +1,12 @@
-import { toAbortError } from '../abort'
-import { toConduitError, type ConduitError } from '../errors'
-import type { EventBus } from '../events'
-import { IDEMPOTENT_METHODS, type ConduitRequest, type Middleware, type Plugin } from '../types'
+import { toAbortError } from '../http/abort'
+import { toConduitError, type ConduitError } from '../primitives/errors'
+import type { EventBus } from '../primitives/events'
+import {
+	IDEMPOTENT_METHODS,
+	type ConduitRequest,
+	type Middleware,
+	type Plugin,
+} from '../primitives/types'
 
 /*
  *   CONFIG
@@ -59,12 +64,8 @@ function retryAfter(error: ConduitError): number | undefined {
 /*
  *   SLEEP
  ***************************************************************************************************/
-/** Waits, unless the request is cancelled first — a backoff must not outlive its request. */
+/** Waits, unless the request is cancelled first. A backoff must not outlive its request. */
 function sleep(ms: number, request: ConduitRequest): Promise<void> {
-	// An already-aborted signal never fires its listener, so without this check a
-	// cancellation landing between the failed attempt and the backoff would be
-	// ignored entirely: the wait runs to the end and another request goes out to
-	// a server the caller has already walked away from.
 	if (request.signal.aborted) {
 		return Promise.reject(toAbortError(request))
 	}
@@ -88,12 +89,8 @@ function sleep(ms: number, request: ConduitRequest): Promise<void> {
  *   PLUGIN
  ***************************************************************************************************/
 /**
- * Replays a failed request with exponential backoff.
- *
- * Sits outside the queue in the default stack, so a replay re-enters the
- * scheduler and waits its turn. A retry that skipped the queue would let a
- * failing endpoint amplify itself into exactly the stampede the queue exists to
- * prevent.
+ * Replays a failed request with exponential backoff. Install it outside the
+ * queue so a replay waits its turn instead of amplifying a failing endpoint.
  */
 export function retry(config: RetryConfig = {}): Plugin {
 	const attempts = config.attempts ?? 3
@@ -110,9 +107,6 @@ export function retry(config: RetryConfig = {}): Plugin {
 			return config.shouldRetry(error, request, attempt)
 		}
 
-		// Cancelled means someone decided they no longer want this; a config
-		// mistake will fail identically next time; an unrecoverable session is
-		// unrecoverable on attempt two as well.
 		if (
 			error.code === 'ABORTED' ||
 			error.code === 'CONFIG' ||
@@ -135,13 +129,9 @@ export function retry(config: RetryConfig = {}): Plugin {
 	}
 
 	/**
-	 * How long to wait before the next attempt, or `undefined` to give up.
-	 *
-	 * A `Retry-After` longer than `maxDelay` gives up rather than being clamped.
-	 * Clamping would hammer a server that just asked for an hour, and honouring
-	 * it verbatim would park the caller's promise for that hour with no spinner
-	 * ever resolving. Failing now is the only option that respects both the
-	 * server's instruction and the ceiling the caller configured.
+	 * How long to wait before the next attempt, or `undefined` to give up. A
+	 * `Retry-After` beyond `maxDelay` gives up rather than being clamped, which
+	 * would ignore what the server just asked for.
 	 */
 	const backoff = (error: ConduitError, attempt: number): number | undefined => {
 		const instructed = retryAfter(error)
@@ -152,8 +142,6 @@ export function retry(config: RetryConfig = {}): Plugin {
 
 		const window = Math.min(maxDelay, baseDelay * 2 ** (attempt - 1))
 
-		// Full jitter: without it, every client that failed together retries
-		// together, and the server gets the same spike twice.
 		return jitter ? Math.random() * window : window
 	}
 

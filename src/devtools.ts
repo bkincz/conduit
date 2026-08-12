@@ -1,9 +1,9 @@
-import type { Client } from './core'
-import type { ConduitErrorCode } from './errors'
-import type { ConduitEvent, Unsubscribe } from './events'
+import type { Client } from './client/core'
+import type { ConduitErrorCode } from './primitives/errors'
+import type { ConduitEvent, Unsubscribe } from './primitives/events'
 import type { SessionStatus } from './plugins/session'
-import { createStore, type ReadableStore } from './stores'
-import type { ConduitRequest, ResponseSource } from './types'
+import { createStore, type ReadableStore } from './primitives/stores'
+import type { ConduitRequest, ResponseSource } from './primitives/types'
 
 /*
  *   STATE
@@ -13,7 +13,7 @@ export interface DevtoolsEntry {
 	readonly key: string
 	readonly method: string
 	readonly url: string
-	/** Which app or remote issued it — the question a shared client makes hard to answer otherwise. */
+	/** Which app or remote issued it. */
 	readonly owner: string | undefined
 	readonly lane: string
 	readonly state: 'pending' | 'success' | 'error'
@@ -48,10 +48,7 @@ export interface DevtoolsState {
 export interface DevtoolsConfig {
 	/** How many finished requests to keep. Defaults to 100. */
 	max?: number
-	/**
-	 * Also hang the handle on `globalThis.__CONDUIT_DEVTOOLS__`, so a browser
-	 * console can reach it without the app wiring anything up. Defaults to true.
-	 */
+	/** Hang the handle on `globalThis.__CONDUIT_DEVTOOLS__` for console access. Defaults to true. */
 	expose?: boolean
 }
 
@@ -82,15 +79,8 @@ type DevtoolsScope = typeof globalThis & { [GLOBAL_KEY]?: Devtools }
  *   ATTACH
  ***************************************************************************************************/
 /**
- * Watches one client and exposes what it is doing as an observable store.
- *
- * Reads the event stream and nothing else, so it needs no cooperation from the
- * plugins and adds nothing to a production bundle — this is a separate entry
- * precisely so it cannot end up in one by accident.
- *
- * Because the client is shared across bundles, this sees traffic from every
- * remote on the page at once, attributed by owner. That is the view a composed
- * frontend has no other way to get.
+ * Watches one client through its event stream and nothing else, so a shared
+ * client shows traffic from every remote on the page, attributed by owner.
  */
 export function attachDevtools(client: Client, config: DevtoolsConfig = {}): Devtools {
 	const max = config.max ?? 100
@@ -158,8 +148,6 @@ export function attachDevtools(client: Client, config: DevtoolsConfig = {}): Dev
 							duration: undefined,
 							startedAt: event.at,
 						},
-						// Bounded here rather than on completion, so a burst of
-						// pending requests cannot grow the log without limit.
 						...current.entries.slice(0, max - 1),
 					],
 				}))

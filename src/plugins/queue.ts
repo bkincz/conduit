@@ -1,6 +1,7 @@
-import { toAbortError } from '../abort'
-import type { EventBus } from '../events'
-import type { ConduitRequest, Lane, Middleware, Plugin } from '../types'
+import { toAbortError } from '../http/abort'
+import { ConduitError } from '../primitives/errors'
+import type { EventBus } from '../primitives/events'
+import type { ConduitRequest, Lane, Middleware, Plugin } from '../primitives/types'
 
 /*
  *   CONFIG
@@ -10,10 +11,7 @@ export interface QueueConfig {
 	concurrency?: number
 	/** Lanes in priority order, most urgent first. */
 	lanes?: readonly Lane[]
-	/**
-	 * Per-lane ceilings, so one lane cannot take the whole pool. A lane with no
-	 * entry may use all of it.
-	 */
+	/** Per-lane ceilings, so one lane cannot take the whole pool. Minimum 1. */
 	limits?: Readonly<Record<string, number>>
 }
 
@@ -29,6 +27,17 @@ export const QUEUE_META = 'queue'
 
 const DEFAULT_LANES: readonly Lane[] = ['critical', 'default', 'prefetch']
 
+function assertPositive(what: string, value: number): void {
+	if (Number.isInteger(value) && value >= 1) {
+		return
+	}
+
+	throw new ConduitError({
+		code: 'CONFIG',
+		message: `queue({ ${what}: ${String(value)} }) would never let a request run. It must be a whole number of at least 1. A ceiling of 0 does not disable a lane, it hangs every request on it.`,
+	})
+}
+
 /*
  *   WAITER
  ***************************************************************************************************/
@@ -43,16 +52,9 @@ interface Waiter {
  *   PLUGIN
  ***************************************************************************************************/
 /**
- * Bounded concurrency with priority lanes.
- *
- * A composed frontend has no single owner of request volume: the host is
- * booting while three remotes mount and each fires whatever it needs. Without a
- * scheduler the host's critical path queues behind a remote's speculative
- * prefetching, in the browser's connection pool where nothing can reorder it.
- *
- * Sits inside retry in the default stack, so a replay rejoins the queue and
- * waits its turn rather than letting a failing endpoint amplify itself into a
- * stampede.
+ * Bounded concurrency with priority lanes, so a remote's speculative
+ * prefetching cannot queue ahead of the host's boot path down in the browser's
+ * connection pool.
  */
 export function queue(config: QueueConfig = {}): Plugin<QueueApi> {
 	const concurrency = config.concurrency ?? 6
@@ -60,13 +62,17 @@ export function queue(config: QueueConfig = {}): Plugin<QueueApi> {
 	const limits = config.limits ?? {}
 	const priorities = new Map<string, number>(lanes.map((lane, index) => [lane, index]))
 
+	assertPositive('concurrency', concurrency)
+
+	for (const [lane, limit] of Object.entries(limits)) {
+		assertPositive(`limits.${lane}`, limit)
+	}
+
 	const waiting: Waiter[] = []
 	const laneActive = new Map<string, number>()
 	let active = 0
 	let events: EventBus | undefined
 
-	// An unconfigured lane sorts last rather than being rejected: a remote naming
-	// its own lane should be scheduled politely, not refused.
 	const priorityOf = (lane: Lane): number => priorities.get(lane) ?? lanes.length
 	const limitOf = (lane: Lane): number => limits[lane] ?? concurrency
 	const activeIn = (lane: Lane): number => laneActive.get(lane) ?? 0
@@ -87,9 +93,6 @@ export function queue(config: QueueConfig = {}): Plugin<QueueApi> {
 		for (;;) {
 			let chosen = -1
 
-			// Scanned in insertion order with a strict comparison, so the earliest
-			// waiter of the best runnable priority wins — priority across lanes,
-			// FIFO within one.
 			for (let index = 0; index < waiting.length; index++) {
 				const waiter = waiting[index]
 				const best = chosen === -1 ? undefined : waiting[chosen]
@@ -114,7 +117,6 @@ export function queue(config: QueueConfig = {}): Plugin<QueueApi> {
 			}
 
 			waiter.detach()
-			// Taken here, synchronously, so the next pass of this loop counts it.
 			acquire(waiter.lane)
 			waiter.resolve()
 		}
@@ -151,8 +153,6 @@ export function queue(config: QueueConfig = {}): Plugin<QueueApi> {
 			return next(request)
 		}
 
-		// Checked before queuing. A cancelled request must not take a slot, and an
-		// already-aborted signal never fires the listener that would free it.
 		if (request.signal.aborted) {
 			throw toAbortError(request)
 		}
@@ -200,8 +200,6 @@ export function queue(config: QueueConfig = {}): Plugin<QueueApi> {
 			}
 		},
 		onDestroy: () => {
-			// Waiters are released by the root signal aborting during destroy; this
-			// only drops the bookkeeping.
 			waiting.length = 0
 			laneActive.clear()
 			active = 0

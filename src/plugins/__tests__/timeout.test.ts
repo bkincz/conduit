@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createClient } from '../../core'
+import { createClient } from '../../client/core'
 import { hangingFetch, jsonResponse, stubFetch } from '../../__tests__/helpers'
 import { timeout } from '../timeout'
 
@@ -32,7 +32,6 @@ describe('timeout', () => {
 
 		await expect(client.get('/fast')).resolves.toEqual({ ok: true })
 
-		// Nothing should be waiting to fire against a request that already settled.
 		expect(vi.getTimerCount()).toBe(0)
 	})
 

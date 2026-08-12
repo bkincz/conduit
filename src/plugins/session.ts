@@ -1,5 +1,5 @@
-import { toConduitError, type ConduitError } from '../errors'
-import type { EventBus, Unsubscribe } from '../events'
+import { toConduitError, type ConduitError } from '../primitives/errors'
+import type { EventBus, Unsubscribe } from '../primitives/events'
 import type {
 	ClientContext,
 	ConduitPromise,
@@ -7,7 +7,9 @@ import type {
 	Middleware,
 	Plugin,
 	RequestOptions,
-} from '../types'
+} from '../primitives/types'
+import { CACHE_META } from './cache'
+import { DEDUPE_META } from './dedupe'
 
 /*
  *   ADAPTER
@@ -20,27 +22,15 @@ export interface AdapterContext {
 }
 
 /**
- * Everything backend-specific about a session.
- *
- * conduit owns the parts that are hard and shared — single-flight loading, one
- * state for every bundle on the page, expiry-driven revalidation, and exactly
- * one terminal handoff no matter how many requests fail at once. The adapter
- * owns the parts that differ per backend, and nothing else needs to change when
- * the backend does.
- *
- * A cookie-session backend implements `load` and nothing else. A token backend
- * adds `authorize` and `renew`.
+ * Everything backend-specific about a session. A cookie backend implements
+ * `load` and nothing else. A token backend adds `authorize` and `renew`.
  */
 export interface SessionAdapter<S = unknown> {
 	/** Reads the current session. `null` means signed out, which is not an error. */
 	load(ctx: AdapterContext): Promise<S | null>
 	/**
-	 * Attaches credentials to an outgoing request.
-	 *
-	 * If what you attach can differ between callers of the *same* client, patch
-	 * `variance` too — otherwise two callers with different credentials share one
-	 * cache entry. A token drawn from this shared session is the same for
-	 * everyone, so the common case needs nothing.
+	 * Attaches credentials to an outgoing request. Patch `variance` too if what
+	 * you attach can differ between callers of the same client.
 	 */
 	authorize?(request: ConduitRequest, session: S | null): ConduitRequest | void
 	/** Whether a failure means the session is at fault. Defaults to HTTP 401. */
@@ -80,10 +70,7 @@ export interface SessionApi<S = unknown> {
 
 export interface SessionConfig<S = unknown> {
 	adapter: SessionAdapter<S>
-	/**
-	 * Called once, when the session is gone and cannot be recovered. Everything
-	 * in flight has already been aborted by the time it runs.
-	 */
+	/** Called once, after everything in flight has been aborted and cached data dropped. */
 	onUnauthenticated?: (error: ConduitError) => void
 	/** Read the session as soon as the plugin installs. Defaults to false. */
 	eager?: boolean
@@ -96,20 +83,16 @@ export const SESSION_META = 'conduit.session'
 
 const UNAUTHORISED = 401
 
+/** `setTimeout` takes a 32-bit signed delay. Anything longer wraps and fires immediately. */
+const MAX_DELAY = 2_147_483_647
+
 /*
  *   PLUGIN
  ***************************************************************************************************/
 /**
- * One session, shared by every bundle on the page.
- *
- * The failure this exists to prevent: four remotes hit a 401 at the same
- * moment, four recoveries run concurrently, and a backend that rotates its
- * refresh token invalidates three of them — signing the user out for having too
- * many tabs open. Recovery here is single-flight, and the terminal handoff runs
- * exactly once no matter how many requests were in the air.
- *
- * Sits inside cache and dedupe so a served hit costs nothing, and outside retry
- * so a recovery replays a request that has already exhausted its own attempts.
+ * One session for every bundle on the page. Loading and recovery are
+ * single-flight, and the terminal handoff runs once however many requests
+ * failed at the same moment.
  */
 export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionApi<S>> {
 	const adapter = config.adapter
@@ -149,6 +132,17 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 		}
 	}
 
+	/** Arms a timer for a delay of any size, in chunks the platform can hold. */
+	const arm = (delay: number, run: () => void): void => {
+		if (delay > MAX_DELAY) {
+			timer = setTimeout(() => arm(delay - MAX_DELAY, run), MAX_DELAY)
+
+			return
+		}
+
+		timer = setTimeout(run, Math.max(0, delay))
+	}
+
 	const schedule = (value: S | null): void => {
 		clearTimeout(timer)
 		timer = undefined
@@ -159,19 +153,13 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 
 		const expires = adapter.expiresAt(value)
 
-		if (expires === undefined) {
+		if (expires === undefined || !Number.isFinite(expires)) {
 			return
 		}
 
-		// A backend that rolls expiry on access turns this into a keep-alive; one
-		// that does not gets a re-read just before the session lapses, rather than
-		// the user discovering it through a failed action.
-		timer = setTimeout(
-			() => {
-				void reload().catch(() => {})
-			},
-			Math.max(0, expires - Date.now() - leeway)
-		)
+		arm(expires - Date.now() - leeway, () => {
+			void reload().catch(() => {})
+		})
 	}
 
 	const adapterContext: AdapterContext = {
@@ -183,21 +171,34 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			return context.request<T>(path, {
 				...options,
 				lane: options?.lane ?? 'critical',
-				meta: { ...options?.meta, [SESSION_META]: true },
+				meta: {
+					...options?.meta,
+					[SESSION_META]: true,
+					[CACHE_META]: 'bypass',
+					[DEDUPE_META]: 'bypass',
+				},
 			})
 		},
 		signal: lifetime.signal,
 	}
 
 	const run = async (): Promise<S | null> => {
+		const before = state.status
+
 		publish({ ...state, status: 'loading', updatedAt: Date.now() })
 
 		try {
 			const value = await adapter.load(adapterContext)
+			const signedIn = value !== null
 
 			terminated = false
+
+			if ((before === 'authenticated' && !signedIn) || (before === 'anonymous' && signedIn)) {
+				context?.resetIdentity()
+			}
+
 			publish({
-				status: value === null ? 'anonymous' : 'authenticated',
+				status: signedIn ? 'authenticated' : 'anonymous',
 				session: value,
 				error: null,
 				updatedAt: Date.now(),
@@ -243,10 +244,8 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 
 		publish({ status: 'anonymous', session: null, error, updatedAt: Date.now() })
 
-		// Ordered deliberately: stop the doomed traffic first, then hand over. The
-		// callback usually navigates away, and twenty failing requests racing a
-		// redirect help nobody.
 		context?.abortAll('The session is gone.')
+		context?.resetIdentity()
 		config.onUnauthenticated?.(error)
 	}
 
@@ -290,9 +289,10 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			return next(request)
 		}
 
-		if (adapter.authorize !== undefined && state.status === 'unknown') {
-			// A token backend cannot send anything useful until it knows the token.
-			// A cookie backend has no authorize, so it never pays this wait.
+		if (
+			adapter.authorize !== undefined &&
+			(state.status === 'unknown' || state.status === 'loading')
+		) {
 			await load().catch(() => {})
 		}
 
@@ -310,10 +310,17 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 				throw error
 			}
 
-			// Re-authorised against the new session, and replayed once rather than
-			// in a loop: if a freshly renewed session is still rejected, the
-			// problem is not the session.
-			return await next(authorize(request))
+			try {
+				return await next(authorize(request))
+			} catch (replayCause) {
+				const replayed = toConduitError(replayCause)
+
+				if (isUnauthenticated(replayed)) {
+					terminate(replayed)
+				}
+
+				throw replayed
+			}
 		}
 	}
 
@@ -332,6 +339,7 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			clearTimeout(timer)
 			timer = undefined
 			terminated = false
+			context?.resetIdentity()
 			publish({ status: 'unknown', session: null, error: null, updatedAt: Date.now() })
 		},
 	}

@@ -1,5 +1,5 @@
-import type { EventBus } from '../events'
-import type { Middleware, Plugin } from '../types'
+import type { EventBus } from '../primitives/events'
+import type { Middleware, Plugin } from '../primitives/types'
 
 /*
  *   CONFIG
@@ -25,15 +25,8 @@ export interface ContractConfig {
  *   PLUGIN
  ***************************************************************************************************/
 /**
- * Notices when a bundle is talking to an API it was not built against.
- *
- * Remotes deploy on their own schedule against one backend, so a remote can
- * sit on a page for hours after the API it was compiled against was replaced.
- * The symptom is a field that is suddenly missing or renamed, three layers
- * down, in one remote only — this turns that into a statement about versions.
- *
- * Reports once per distinct server version, not once per request: a skew is a
- * deployment fact, and repeating it every request only buries it.
+ * Notices when a bundle is talking to an API it was not built against, and says
+ * so once per server version rather than once per request.
  */
 export function contract(config: ContractConfig): Plugin {
 	const header = config.header ?? 'x-api-version'

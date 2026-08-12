@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { createClient } from '../../core'
+import { createClient } from '../../client/core'
 import { deferredFetch, jsonResponse, stubFetch } from '../../__tests__/helpers'
 import { dedupe } from '../dedupe'
 
@@ -84,11 +84,6 @@ describe('dedupe', () => {
 		expect(client.inFlight()).toBe(0)
 	})
 
-	/*
-	 * The reason dedupe is reference-counted rather than a shared promise: a
-	 * remote unmounting mid-flight must not take the response away from the
-	 * remote still on screen.
-	 */
 	it('lets one participant leave without cancelling the others', async () => {
 		const deferred = deferredFetch()
 		const client = createClient({ fetch: deferred.fetch }).with(dedupe())

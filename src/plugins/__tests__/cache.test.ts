@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createClient } from '../../core'
+import { createClient } from '../../client/core'
 import { jsonResponse, stubFetch } from '../../__tests__/helpers'
 import { cache } from '../cache'
 
@@ -76,9 +76,6 @@ describe('cache', () => {
 		expect(stub.calls).toHaveLength(2)
 	})
 
-	/*
-	 * Stale-while-revalidate
-	 */
 	it('serves stale immediately and refreshes behind it', async () => {
 		let version = 1
 		const stub = stubFetch(() => jsonResponse({ version: version++ }))
@@ -109,7 +106,6 @@ describe('cache', () => {
 
 		await flush()
 
-		// One to populate, one refresh shared by the three stale reads.
 		expect(stub.calls).toHaveLength(2)
 	})
 
@@ -130,9 +126,6 @@ describe('cache', () => {
 		await expect(client.get('/me')).resolves.toEqual({ id: 1 })
 	})
 
-	/*
-	 * Eviction
-	 */
 	it('evicts the least recently used entry past the cap', async () => {
 		const stub = stubFetch(ok)
 		const client = createClient({ fetch: stub.fetch }).with(cache({ max: 2 }))
@@ -156,7 +149,6 @@ describe('cache', () => {
 		await client.get('/a')
 		await client.get('/c')
 
-		// /b was the oldest read, so it went rather than /a.
 		await client.get('/a')
 		expect(stub.calls).toHaveLength(3)
 
@@ -164,9 +156,6 @@ describe('cache', () => {
 		expect(stub.calls).toHaveLength(4)
 	})
 
-	/*
-	 * Invalidation
-	 */
 	it('drops one entry by key', async () => {
 		const stub = stubFetch(ok)
 		const client = createClient({ baseUrl: '/api', fetch: stub.fetch }).with(cache())
@@ -203,9 +192,6 @@ describe('cache', () => {
 		expect(client.cacheSize()).toBe(0)
 	})
 
-	/*
-	 * Immutability
-	 */
 	it('freezes what it hands out, so one reader cannot corrupt another', async () => {
 		const client = createClient({
 			fetch: stubFetch(() => jsonResponse({ user: { name: 'Ada' } })).fetch,
@@ -218,9 +204,6 @@ describe('cache', () => {
 		}).toThrow(TypeError)
 	})
 
-	/*
-	 * Events
-	 */
 	it('reports hits, misses and invalidations', async () => {
 		const client = createClient({ fetch: stubFetch(ok).fetch }).with(cache())
 		const seen: string[] = []

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { createClient } from '../../core'
+import { createClient } from '../../client/core'
 import { jsonResponse, stubFetch } from '../../__tests__/helpers'
 import { cache } from '../cache'
 import { observable } from '../observable'

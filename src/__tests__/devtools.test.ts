@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { createClient } from '../core'
-import { defaults } from '../defaults'
+import { createClient } from '../client/core'
+import { defaults } from '../client/defaults'
 import { attachDevtools, getDevtools } from '../devtools'
 import { createMockServer, status } from '../testing'
 
@@ -90,9 +90,6 @@ describe('devtools', () => {
 
 		const counters = devtools.store.get().counters
 
-		// Both concurrent reads miss: the cache sits outside dedupe, so neither
-		// has stored anything by the time the other arrives. Dedupe is what
-		// collapses them into one request below.
 		expect(counters.cacheMisses).toBe(2)
 		expect(counters.dedupeJoins).toBe(1)
 		expect(counters.cacheHits).toBe(1)

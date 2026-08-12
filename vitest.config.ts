@@ -12,15 +12,7 @@ export default defineConfig({
 			provider: 'v8',
 			reporter: ['text', 'json', 'html'],
 			include: ['src/**/*.ts'],
-			exclude: [
-				'src/**/__tests__/**',
-				'src/**/*.d.ts',
-				// Entry barrels are re-exports; covering them proves nothing.
-				'src/index.ts',
-				'src/react.ts',
-				'src/devtools.ts',
-				'src/testing.ts',
-			],
+			exclude: ['src/**/__tests__/**', 'src/__bench__/**', 'src/**/*.d.ts', 'src/index.ts'],
 			thresholds: {
 				statements: 90,
 				branches: 90,

@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createClient } from '../../core'
+import { createClient } from '../../client/core'
 import { hangingFetch, jsonResponse, stubFetch } from '../../__tests__/helpers'
 import { retry, type RetryInfo } from '../retry'
 
-/** Fails the first `failures` calls with `status`, then succeeds. */
 function flaky(
 	failures: number,
 	status = 503
@@ -112,7 +111,6 @@ describe('retry', () => {
 		const scope = client.scope('remote:profile')
 		const pending = scope.get('/x').safe()
 
-		// Let the first attempt fail and the backoff begin.
 		await new Promise(resolve => setTimeout(resolve, 0))
 		scope.abort()
 

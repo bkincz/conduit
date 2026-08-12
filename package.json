@@ -1,6 +1,6 @@
 {
 	"name": "@bkincz/conduit",
-	"version": "0.0.0",
+	"version": "1.0.0",
 	"description": "Data-fetching client for micro frontends: one shared client across every bundle on the page",
 	"type": "module",
 	"main": "./dist/index.cjs",

@@ -1,14 +1,15 @@
-import type { EventBus } from '../events'
-import { protect } from '../freeze'
-import { withRequest } from '../request'
+import type { EventBus } from '../primitives/events'
+import { protect } from '../primitives/freeze'
+import { withRequest } from '../http/request'
 import type {
+	ClientContext,
 	ConduitRequest,
 	ConduitResponse,
 	Middleware,
 	Next,
 	Plugin,
 	ResponseSource,
-} from '../types'
+} from '../primitives/types'
 
 /*
  *   CONFIG
@@ -29,9 +30,8 @@ export interface CacheConfig {
 
 export interface CacheApi {
 	/**
-	 * Drops one entry by key, and suppresses any read of it already in flight.
-	 * Returns whether a stored entry was removed — `false` still means an
-	 * in-flight response for that key will not be stored.
+	 * Drops one entry and suppresses any read of that key already in flight.
+	 * `false` means nothing was stored, not that the in-flight read survives.
 	 */
 	invalidate(key: string): boolean
 	/** Drops every entry carrying a tag. Returns how many went. */
@@ -43,6 +43,9 @@ export interface CacheApi {
 const CACHEABLE: ReadonlySet<string> = new Set(['GET', 'HEAD'])
 
 const byMethod = (request: ConduitRequest): boolean => CACHEABLE.has(request.method)
+
+/** Skips the cache entirely: `client.get('/x', { meta: { cache: 'bypass' } })`. */
+export const CACHE_META = 'cache'
 
 /*
  *   ENTRY
@@ -56,13 +59,17 @@ interface Entry {
 	staleUntil: number
 }
 
+/** A read in flight, and whether an invalidation has overtaken it. */
+interface PendingRead {
+	readonly key: string
+	readonly tags: readonly string[]
+	suppressed: boolean
+}
+
 /**
- * Tags accumulate rather than being replaced.
- *
- * One key can be populated by several callers, and only some of them may know
- * it belongs to a tag group. If the last writer won, an untagged refetch would
- * silently unhook the entry from `invalidateTag` and the next invalidation
- * would quietly miss it. Over-invalidating is the safe direction.
+ * Tags accumulate rather than being replaced. Several callers populate one key
+ * and only some know its tags, so last-write-wins would unhook the entry from
+ * `invalidateTag` without saying so.
  */
 function mergeTags(
 	previous: readonly string[] | undefined,
@@ -89,12 +96,8 @@ function mergeTags(
  *   PLUGIN
  ***************************************************************************************************/
 /**
- * A shared response cache.
- *
- * Outermost in the default stack, so a hit costs a map lookup and nothing else
- * — no headers built, no signals composed, no network. Because one client is
- * shared across bundles, a remote that mounts second reads what the first
- * already fetched.
+ * A response cache shared by every bundle, so a remote that mounts second reads
+ * what the first already fetched. A hit costs a map lookup and nothing else.
  */
 export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 	const ttl = config.ttl ?? 30_000
@@ -111,21 +114,32 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 	const revalidating = new Set<string>()
 
 	/**
-	 * Bumped by every invalidation. A read that started before the bump must not
-	 * store what it fetched: it was answered by the server before the write that
-	 * prompted the invalidation, so storing it would reinstate exactly the stale
-	 * value the caller just asked to be rid of.
+	 * A read that started before an invalidation must not store what it fetched.
+	 * Tracked per read rather than by a shared counter, which would also discard
+	 * every unrelated response in flight at the time.
 	 */
-	let epoch = 0
+	const inFlight = new Set<PendingRead>()
 
-	// Background refreshes outlive the caller that triggered them, so they run on
-	// the plugin's own lifetime rather than that caller's signal.
 	const lifetime = new AbortController()
 	let events: EventBus | undefined
+	let context: ClientContext | undefined
+
+	const begin = (request: ConduitRequest): PendingRead => {
+		const pending: PendingRead = { key: request.key, tags: request.tags, suppressed: false }
+		inFlight.add(pending)
+
+		return pending
+	}
+
+	const suppress = (matches: (pending: PendingRead) => boolean): void => {
+		for (const pending of inFlight) {
+			if (matches(pending)) {
+				pending.suppressed = true
+			}
+		}
+	}
 
 	const announce = (target: string, removed: number): number => {
-		epoch++
-
 		if (removed > 0 && events?.active === true) {
 			events.emit('cache:invalidate', {
 				type: 'cache:invalidate',
@@ -145,16 +159,18 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 			return undefined
 		}
 
-		// Re-insert to move it to the back: Map iterates in insertion order, which
-		// makes the first key the least recently used without a second structure.
 		entries.delete(key)
 		entries.set(key, entry)
 
 		return entry
 	}
 
-	const write = (request: ConduitRequest, response: ConduitResponse, since: number): void => {
-		if (epoch !== since) {
+	const write = (
+		request: ConduitRequest,
+		response: ConduitResponse,
+		pending: PendingRead
+	): void => {
+		if (pending.suppressed) {
 			return
 		}
 
@@ -194,7 +210,6 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 		request,
 	})
 
-	// A server saying "do not store this" outranks our own ttl.
 	const storable = (response: ConduitResponse): boolean => {
 		const control = response.headers.get('cache-control')
 
@@ -208,23 +223,23 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 
 		revalidating.add(request.key)
 
-		const since = epoch
-		// Detached from the triggering caller. Otherwise the remote that happened
-		// to read the stale value kills the refresh when it unmounts, and with an
-		// unbounded stale window the entry is pinned stale for every other remote
-		// on the page — forever.
-		const detached = withRequest(request, { signal: lifetime.signal })
+		const detached = withRequest(request, {
+			signal: lifetime.signal,
+			meta: { ...request.meta, [CACHE_META]: 'bypass' },
+		})
 
-		next(detached)
+		const pending = begin(detached)
+		const dispatch = context?.dispatch ?? next
+
+		dispatch(detached)
 			.then(response => {
 				if (storable(response)) {
-					write(detached, response, since)
+					write(detached, response, pending)
 				}
 			})
-			// A failed background refresh is not the caller's problem: they already
-			// have the stale value, and the next miss will surface the failure.
 			.catch(() => {})
 			.finally(() => {
+				inFlight.delete(pending)
 				revalidating.delete(request.key)
 			})
 
@@ -232,7 +247,7 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 	}
 
 	const middleware: Middleware = async (request, next) => {
-		if (!shouldCache(request)) {
+		if (request.meta[CACHE_META] === 'bypass' || !shouldCache(request)) {
 			return next(request)
 		}
 
@@ -268,10 +283,6 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 
 				return serve(entry, request, 'cache')
 			}
-
-			// Left in place rather than deleted: it is past its stale window so it
-			// can never be served, but it still carries the tags this key was
-			// registered under, and `write` folds them into the replacement.
 		}
 
 		if (events?.active === true) {
@@ -283,25 +294,43 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 			})
 		}
 
-		const since = epoch
-		const response = await next(request)
+		const pending = begin(request)
 
-		if (storable(response)) {
-			write(request, response, since)
+		try {
+			const response = await next(request)
+
+			if (storable(response)) {
+				write(request, response, pending)
+			}
+
+			return response
+		} finally {
+			inFlight.delete(pending)
 		}
-
-		return response
 	}
+
+	let release: (() => void) | undefined
 
 	return {
 		name: 'cache',
 		middleware,
 		onInit: ctx => {
 			events = ctx.events
+			context = ctx
+
+			release = ctx.onResetIdentity(() => {
+				const removed = entries.size
+				entries.clear()
+				suppress(() => true)
+				announce('*', removed)
+			})
 
 			return {
-				invalidate: (key: string): boolean =>
-					announce(key, entries.delete(key) ? 1 : 0) > 0,
+				invalidate: (key: string): boolean => {
+					suppress(pending => pending.key === key)
+
+					return announce(key, entries.delete(key) ? 1 : 0) > 0
+				},
 
 				invalidateTag: (tag: string): number => {
 					let removed = 0
@@ -313,12 +342,15 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 						}
 					}
 
+					suppress(pending => pending.tags.includes(tag))
+
 					return announce(`tag:${tag}`, removed)
 				},
 
 				clearCache: (): void => {
 					const removed = entries.size
 					entries.clear()
+					suppress(() => true)
 					announce('*', removed)
 				},
 
@@ -326,9 +358,12 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 			}
 		},
 		onDestroy: () => {
+			release?.()
+			release = undefined
 			lifetime.abort()
 			entries.clear()
 			revalidating.clear()
+			inFlight.clear()
 		},
 	}
 }

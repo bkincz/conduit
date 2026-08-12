@@ -1,5 +1,5 @@
-import { ConduitError } from './errors'
-import type { FetchLike, HttpMethod } from './types'
+import { ConduitError } from './primitives/errors'
+import type { FetchLike, HttpMethod } from './primitives/types'
 
 /*
  *   REQUEST
@@ -32,13 +32,7 @@ export interface MockCall {
 /*
  *   RESPONDERS
  ***************************************************************************************************/
-/**
- * A literal answer.
- *
- * Spelled out rather than `unknown`, which would absorb the function arm of
- * {@link MockResponder} and leave responder callbacks with an implicit `any`
- * parameter.
- */
+/** Spelled out rather than `unknown`, which would absorb the function arm of {@link MockResponder}. */
 export type MockValue =
 	| Response
 	| Error
@@ -51,10 +45,8 @@ export type MockValue =
 	| undefined
 
 /**
- * What a route answers with.
- *
  * A `Response` is used as-is, an `Error` is thrown as a network failure, and
- * anything else is JSON — so the common case is `server.get('/me', { id: 1 })`.
+ * anything else is JSON, so the common case is `server.get('/me', { id: 1 })`.
  */
 export type MockResponder = ((request: MockRequest) => unknown) | MockValue
 
@@ -130,11 +122,7 @@ export interface MockRouteOptions {
 export interface MockServerConfig {
 	/** Prefixed to every string pattern, so routes read like the client's paths. */
 	baseUrl?: string
-	/**
-	 * What an unmatched request does. Throwing (the default) fails the test at
-	 * the request, naming it; a silent 404 would surface as an assertion failure
-	 * somewhere else entirely.
-	 */
+	/** What an unmatched request does. Throwing, the default, fails it where it was made. */
 	onUnmatched?: 'throw' | 'notFound'
 }
 
@@ -176,11 +164,8 @@ interface Route {
 }
 
 /**
- * A server for tests, without a server.
- *
- * Sits at the transport, so everything above it — cache, dedupe, retry, the
- * queue, session recovery — runs for real. That is the point: a mock installed
- * higher up would test the mock.
+ * A server for tests, without a server. It sits at the transport, so cache,
+ * dedupe, retry, the queue and session recovery all run for real.
  *
  * ```ts
  * const server = createMockServer({ baseUrl: '/api' })
@@ -242,9 +227,6 @@ export function createMockServer(config: MockServerConfig = {}): MockServer {
 				return Promise.resolve(new Response(null, { status: 404 }))
 			}
 
-			// A ConduitError with a developer-error code, so the transport passes
-			// it through intact instead of reporting a network failure and burying
-			// the only sentence that says what is actually wrong.
 			return Promise.reject(
 				new ConduitError({
 					code: 'CONFIG',
@@ -298,8 +280,6 @@ async function answer(responder: MockResponder, request: MockRequest): Promise<R
 		return result
 	}
 
-	// Thrown rather than returned: a network failure is the absence of a
-	// response, and handing back a 500 would test a different code path.
 	if (result instanceof Error) {
 		throw result
 	}

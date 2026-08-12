@@ -1,13 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createClient } from '../core'
-import { createRequest, withRequest } from '../request'
-import { clearSharedClients, releaseSharedClient, sharedClient } from '../shared'
+import { createClient } from '../client/core'
+import { createEventBus } from '../primitives/events'
+import type { Executor } from '../client/methods'
+import { createRequest, withRequest } from '../http/request'
+import { createScope } from '../client/scopes'
+import { clearSharedClients, releaseSharedClient, sharedClient } from '../client/shared'
 import { cache } from '../plugins/cache'
 import { dedupe } from '../plugins/dedupe'
+import { observable } from '../plugins/observable'
+import { queue } from '../plugins/queue'
 import { retry } from '../plugins/retry'
-import type { ConduitRequest, Middleware } from '../types'
-import { deferredFetch, hangingFetch, jsonResponse, stubFetch } from './helpers'
+import { session } from '../plugins/session'
+import { timeout } from '../plugins/timeout'
+import type { ConduitRequest, FetchLike, Middleware } from '../primitives/types'
+import { deferredFetch, hangingFetch, jsonResponse, stubFetch, textResponse } from './helpers'
 
 const ok = (): Response => jsonResponse({ id: 1 })
 
@@ -19,9 +26,6 @@ afterEach(() => {
 	vi.useRealTimers()
 })
 
-/*
- *   IDENTITY
- ***************************************************************************************************/
 describe('request identity', () => {
 	it('does not let two remotes with different auth share a cache entry', async () => {
 		const stub = stubFetch(() => jsonResponse({ user: 'whoever asked first' }))
@@ -97,8 +101,6 @@ describe('request identity', () => {
 		const route: Middleware = async (request, next) =>
 			next(withRequest(request, { url: `/shard-${shard}${request.url}` }))
 
-		// Routing sits outside the cache, so the cache sees the rewritten request
-		// — and must see a key that matches it.
 		const client = createClient({ fetch: stub.fetch })
 			.with({ name: 'route', middleware: route })
 			.with(cache())
@@ -143,9 +145,6 @@ describe('request identity', () => {
 	})
 })
 
-/*
- *   PATHS
- ***************************************************************************************************/
 describe('literal colons in paths', () => {
 	it('sends a custom-method url rather than rejecting it', async () => {
 		const stub = stubFetch(ok)
@@ -193,9 +192,6 @@ describe('literal colons in paths', () => {
 	})
 })
 
-/*
- *   FAILURES
- ***************************************************************************************************/
 describe('failing responses', () => {
 	it('reports the status even when the error body does not parse', async () => {
 		const client = createClient({
@@ -247,9 +243,6 @@ describe('failing responses', () => {
 	})
 })
 
-/*
- *   CACHE LIFETIME
- ***************************************************************************************************/
 describe('cache lifetime', () => {
 	it('finishes a background refresh even though the remote that triggered it unmounted', async () => {
 		let version = 1
@@ -293,9 +286,6 @@ describe('cache lifetime', () => {
 	})
 })
 
-/*
- *   SHARED REGISTRY
- ***************************************************************************************************/
 describe('shared registry', () => {
 	it('rebuilds rather than handing out a destroyed client', async () => {
 		vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -323,9 +313,6 @@ describe('shared registry', () => {
 	})
 })
 
-/*
- *   ABORT HANDLING
- ***************************************************************************************************/
 describe('abort handling', () => {
 	it('does not hand a new caller a flight that was already cancelled', async () => {
 		const deferred = deferredFetch()
@@ -337,7 +324,6 @@ describe('abort handling', () => {
 		leaving.abort()
 		expect((await abandoned).error?.code).toBe('ABORTED')
 
-		// Same tick as the abort, before the rejection has unwound.
 		const arriving = client.get('/session')
 		deferred.resolve(jsonResponse({ id: 1 }))
 
@@ -389,9 +375,6 @@ describe('abort handling', () => {
 	})
 })
 
-/*
- *   RETRY BUDGET
- ***************************************************************************************************/
 describe('retry budget', () => {
 	it('gives up rather than parking a caller for a Retry-After beyond maxDelay', async () => {
 		let calls = 0
@@ -432,9 +415,6 @@ describe('retry budget', () => {
 	})
 })
 
-/*
- *   REQUEST OPTIONS
- ***************************************************************************************************/
 describe('caller options', () => {
 	it('does not write pipeline state back into the caller object', async () => {
 		const stub = stubFetch(ok)
@@ -471,9 +451,6 @@ describe('caller options', () => {
 	})
 })
 
-/*
- *   UNCHANGED GUARANTEES
- ***************************************************************************************************/
 describe('guarantees that must survive the fixes', () => {
 	it('still cancels the underlying request when the last participant leaves', async () => {
 		const deferred = deferredFetch()
@@ -495,13 +472,345 @@ describe('guarantees that must survive the fixes', () => {
 	it('still times out a slow request', async () => {
 		vi.useFakeTimers()
 
-		const client = createClient({ fetch: hangingFetch().fetch }).with(
-			(await import('../plugins/timeout')).timeout({ ms: 50 })
-		)
+		const client = createClient({ fetch: hangingFetch().fetch }).with(timeout({ ms: 50 }))
 
 		const pending = client.get('/slow').safe()
 		await vi.advanceTimersByTimeAsync(50)
 
 		expect((await pending).error?.code).toBe('TIMEOUT')
+	})
+})
+
+describe('signing out', () => {
+	it('drops what was cached for whoever was signed in', async () => {
+		const stub = stubFetch(() => jsonResponse({ user: 'A' }))
+		const client = createClient({ fetch: stub.fetch })
+			.with(cache())
+			.with(session({ adapter: { load: async () => ({ name: 'A' }) } }))
+
+		await client.get('/me')
+		expect(client.cacheSize()).toBe(1)
+
+		client.session.clear()
+
+		expect(client.cacheSize()).toBe(0)
+
+		await client.get('/me')
+		expect(stub.calls).toHaveLength(2)
+	})
+
+	it('drops them when the session turns out to be gone as well', async () => {
+		let status = 200
+		const client = createClient({
+			fetch: () => Promise.resolve(jsonResponse({ user: 'A' }, status)),
+		})
+			.with(cache())
+			.with(session({ adapter: { load: async () => ({ name: 'A' }) } }))
+
+		await client.get('/me')
+		status = 401
+		await client.get('/orders').safe()
+
+		expect(client.cacheSize()).toBe(0)
+	})
+
+	it('keeps the cache across a re-read that lands on the same session', async () => {
+		const stub = stubFetch(ok)
+		const client = createClient({ fetch: stub.fetch })
+			.with(cache())
+			.with(session({ adapter: { load: async () => ({ name: 'A' }) } }))
+
+		await client.session.load()
+		await client.get('/me')
+		await client.session.reload()
+
+		expect(client.cacheSize()).toBe(1)
+	})
+})
+
+describe('session lifecycle', () => {
+	it('authorizes every request racing the first load, not just the first one', async () => {
+		const stub = stubFetch(ok)
+		const client = createClient({ fetch: stub.fetch }).with(
+			session({
+				adapter: {
+					load: async () => {
+						await flush()
+						return { name: 'Ada' }
+					},
+					authorize: (request, current) => {
+						if (current === null) {
+							return request
+						}
+
+						const headers = new Headers(request.headers)
+						headers.set('authorization', `Bearer ${current.name}`)
+
+						return withRequest(request, { headers })
+					},
+				},
+			})
+		)
+
+		await Promise.all([client.get('/a'), client.get('/b')])
+
+		expect(stub.calls.map(call => new Headers(call.init.headers).get('authorization'))).toEqual(
+			['Bearer Ada', 'Bearer Ada']
+		)
+	})
+
+	it('reads the session from the server rather than from the cache', async () => {
+		let version = 0
+		const stub = stubFetch(() => jsonResponse({ name: `v${++version}` }))
+		const client = createClient({ fetch: stub.fetch })
+			.with(cache())
+			.with(dedupe())
+			.with(
+				session({
+					adapter: { load: ctx => ctx.request<{ name: string }>('/auth/session') },
+				})
+			)
+
+		await client.session.load()
+		await client.session.reload()
+
+		expect(stub.calls).toHaveLength(2)
+		expect(client.session.get().session).toEqual({ name: 'v2' })
+	})
+
+	it('gives up when a renewed session is still rejected', async () => {
+		const onUnauthenticated = vi.fn()
+		const renew = vi.fn(async () => true)
+		const client = createClient({
+			fetch: () => Promise.resolve(jsonResponse({}, 401)),
+		}).with(
+			session({
+				adapter: { load: async () => ({ name: 'Ada' }), renew },
+				onUnauthenticated,
+			})
+		)
+
+		const { error } = await client.get('/x').safe()
+
+		expect(error?.status).toBe(401)
+		expect(renew).toHaveBeenCalledOnce()
+		expect(onUnauthenticated).toHaveBeenCalledOnce()
+	})
+
+	it('never asks setTimeout for a delay it cannot hold', async () => {
+		const delays: number[] = []
+		const real = globalThis.setTimeout
+
+		vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+			handler: () => void,
+			ms?: number
+		) => {
+			delays.push(ms ?? 0)
+			return real(handler, 0)
+		}) as typeof setTimeout)
+
+		const thirtyDays = 30 * 24 * 60 * 60 * 1000
+		const client = createClient({ fetch: stubFetch(ok).fetch }).with(
+			session({
+				adapter: {
+					load: async () => ({ name: 'Ada' }),
+					expiresAt: () => Date.now() + thirtyDays,
+				},
+			})
+		)
+
+		await client.session.load()
+
+		expect(delays).not.toHaveLength(0)
+		expect(Math.max(...delays)).toBeLessThanOrEqual(2_147_483_647)
+	})
+
+	it('does not let an enormous timeout fire straight away', async () => {
+		const deferred = deferredFetch()
+		const client = createClient({ fetch: deferred.fetch }).with(timeout({ ms: 5_000_000_000 }))
+
+		const pending = client.get('/x')
+		await new Promise(resolve => setTimeout(resolve, 5))
+		deferred.resolve(jsonResponse({ ok: true }))
+
+		await expect(pending).resolves.toEqual({ ok: true })
+	})
+})
+
+describe('observable state', () => {
+	it('does not turn one participant leaving into an error the others see', async () => {
+		const deferred = deferredFetch()
+		const client = createClient({ fetch: deferred.fetch }).with(observable()).with(dedupe())
+		const key = client.keyFor('/todos')
+
+		const staying = client.get('/todos')
+		const leaving = client.scope('remote:leaving')
+		const abandoned = leaving.get('/todos').safe()
+
+		leaving.abort()
+		expect((await abandoned).error?.code).toBe('ABORTED')
+
+		expect(client.observe(key).get()).toMatchObject({ status: 'loading', fetching: true })
+
+		deferred.resolve(jsonResponse({ items: [] }))
+		await staying
+
+		expect(client.observe(key).get()).toMatchObject({ status: 'success', fetching: false })
+	})
+
+	it('never hands back a store it evicted on the way out', async () => {
+		const client = createClient({ fetch: stubFetch(ok).fetch }).with(observable({ max: 1 }))
+
+		client.observe('GET /pinned').subscribe(() => {})
+
+		const store = client.observe(client.keyFor('/fresh'))
+
+		expect(client.observe(client.keyFor('/fresh'))).toBe(store)
+
+		await client.get('/fresh')
+
+		expect(store.get().status).toBe('success')
+	})
+
+	it('lets a background refresh reach the state a component renders from', async () => {
+		let version = 0
+		const client = createClient({
+			fetch: stubFetch(() => jsonResponse({ version: ++version })).fetch,
+		})
+			.with(observable())
+			.with(cache({ ttl: 0, staleWhileRevalidate: true }))
+
+		const key = client.keyFor('/dashboard')
+
+		await client.get('/dashboard')
+		await client.get('/dashboard')
+		await flush()
+
+		expect(client.observe(key).get()).toMatchObject({
+			data: { version: 2 },
+			from: 'network',
+		})
+	})
+})
+
+describe('invalidation', () => {
+	it('only suppresses the in-flight read it was aimed at', async () => {
+		const outstanding = new Map<string, (response: Response) => void>()
+		const fetch: FetchLike = url =>
+			new Promise<Response>(resolve => {
+				outstanding.set(url, resolve)
+			})
+
+		const client = createClient({ fetch }).with(cache())
+
+		const todos = client.get('/todos')
+		const users = client.get('/users')
+
+		client.invalidate('GET /todos')
+
+		outstanding.get('/todos')?.(jsonResponse({ items: [] }))
+		outstanding.get('/users')?.(jsonResponse({ items: [] }))
+		await Promise.all([todos, users])
+
+		expect(client.cacheSize()).toBe(1)
+	})
+
+	it('still suppresses the read it was aimed at when a tag is invalidated', async () => {
+		const deferred = deferredFetch()
+		const client = createClient({ fetch: deferred.fetch }).with(cache())
+
+		const pending = client.get('/todos', { tags: ['todo'] })
+
+		client.invalidateTag('todo')
+		deferred.resolve(jsonResponse({ items: ['stale'] }))
+		await pending
+
+		expect(client.cacheSize()).toBe(0)
+	})
+})
+
+describe('decode mode and repeated headers', () => {
+	it('does not let two decode modes share one entry', async () => {
+		const stub = stubFetch(() => textResponse('plain'))
+		const client = createClient({ fetch: stub.fetch }).with(cache())
+
+		await client.get('/report', { parse: 'text' })
+		await client.get('/report', { parse: 'blob' })
+
+		expect(stub.calls).toHaveLength(2)
+	})
+
+	it('fingerprints a repeated header name the way the wire carries it', async () => {
+		const stub = stubFetch(ok)
+		const client = createClient({ fetch: stub.fetch }).with(cache())
+
+		await client.get('/data', {
+			headers: [
+				['x-tenant', 'acme'],
+				['x-tenant', 'globex'],
+			],
+		})
+		await client.get('/data', { headers: [['x-tenant', 'globex']] })
+
+		expect(stub.calls).toHaveLength(2)
+	})
+})
+
+describe('queue configuration', () => {
+	it('refuses a ceiling that could never let a request run', () => {
+		expect(() => queue({ limits: { prefetch: 0 } })).toThrow(/at least 1/)
+		expect(() => queue({ concurrency: 0 })).toThrow(/at least 1/)
+	})
+})
+
+describe('bookkeeping that would otherwise grow forever', () => {
+	it('detaches an aborted scope, not only a disposed one', () => {
+		const released: string[] = []
+		const scope = createScope({
+			name: 'remote:profile',
+			makeExecutor: () => (() => undefined) as unknown as Executor,
+			onDispose: spent => released.push(spent.name),
+		})
+
+		scope.abort()
+		expect(released).toEqual(['remote:profile'])
+
+		scope.dispose()
+		expect(released).toEqual(['remote:profile'])
+	})
+
+	it('survives an unsubscribe that arrives after the bus was cleared', () => {
+		const bus = createEventBus()
+		const off = bus.on('request:start', () => {})
+
+		bus.clear()
+		off()
+
+		const seen: string[] = []
+		bus.on('request:start', event => seen.push(event.type))
+
+		expect(bus.active).toBe(true)
+
+		bus.emit('request:start', {
+			type: 'request:start',
+			request: createRequest({
+				url: '/x',
+				method: 'GET',
+				body: null,
+				signal: new AbortController().signal,
+				key: 'GET /x',
+				variance: '',
+				lane: 'default',
+				owner: undefined,
+				tags: [],
+				parse: 'auto',
+				credentials: undefined,
+				meta: {},
+				buildHeaders: () => new Headers(),
+			}),
+			at: 0,
+		})
+
+		expect(seen).toEqual(['request:start'])
 	})
 })
