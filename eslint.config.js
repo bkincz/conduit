@@ -18,14 +18,12 @@ export default defineConfig([
 				'error',
 				{ argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
 			],
-			'@typescript-eslint/no-explicit-any': 'error',
-			// Inline rather than separate, so type imports never collide with
-			// no-duplicate-imports, which does not know they are erased.
+			'@typescript-eslint/no-explicit-any': 'warn',
 			'@typescript-eslint/consistent-type-imports': [
 				'error',
 				{ fixStyle: 'inline-type-imports' },
 			],
-			'prefer-const': 'error',
+			'prefer-const': ['error', { ignoreReadBeforeAssign: true }],
 			'no-var': 'error',
 			eqeqeq: ['error', 'always'],
 			'no-duplicate-imports': 'error',

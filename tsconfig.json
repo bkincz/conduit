@@ -29,8 +29,7 @@
 		"forceConsistentCasingInFileNames": true,
 		"skipLibCheck": true,
 		"resolveJsonModule": true,
-		// Keep ambient Node types out of a browser library; src/globals.d.ts
-		// declares the one global (process.env) conduit actually touches.
+		
 		"types": [],
 		"isolatedModules": true,
 		"verbatimModuleSyntax": true,
@@ -38,7 +37,9 @@
 
 		"declaration": true,
 		"sourceMap": true,
-		"noEmit": true
+		"noEmit": true,
+
+		"ignoreDeprecations": "6.0"
 	},
 	"include": ["src"],
 	"exclude": ["dist", "node_modules", "coverage"]

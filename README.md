@@ -1,8 +1,8 @@
-# conduit
+# Conduit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-conduit is a data-fetching client for micro frontends. One client is shared by every bundle on the page, so four remotes asking for the same thing make one request, read one cache, and share one session. Sharing goes through a global registry rather than any framework's provider, so it works the same whichever framework each bundle is built with, and whether they match or not.
+A data-fetching client for micro frontends. One client is shared by every bundle on the page, so four remotes asking for the same thing make one request, read one cache, and share one session. Sharing goes through a global registry rather than any framework's provider, so it works the same whichever framework each bundle is built with, and whether they match or not.
 
 ## Install
 

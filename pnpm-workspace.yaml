@@ -1,12 +1,8 @@
-# pnpm reads settings from here rather than package.json or .npmrc.
-
-# Postinstall scripts are blocked by default. esbuild genuinely needs one to
-# place its platform binary; anything else asking to run scripts is a question,
-# not a formality.
 allowBuilds:
-  esbuild: true
+    esbuild: true
 
-# Supply-chain lag: refuse dependency versions published less than three days
-# ago, so a compromised release has a window to be caught and pulled before it
-# can land in a lockfile here.
+overrides:
+    esbuild: '>=0.28.1'
+
+# 3 days, in minutes.
 minimumReleaseAge: 4320
