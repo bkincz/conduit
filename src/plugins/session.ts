@@ -193,7 +193,7 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			return
 		}
 
-		void reload().catch(() => { })
+		void reload().catch(() => {})
 	}
 
 	const schedule = (value: S | null): void => {
@@ -352,7 +352,7 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			.renew(adapterContext)
 			.then(async recovered => {
 				if (recovered) {
-					await reload().catch(() => { })
+					await reload().catch(() => {})
 				}
 
 				return recovered
@@ -396,7 +396,7 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			adapter.authorize !== undefined &&
 			(state.status === 'unknown' || state.status === 'loading')
 		) {
-			await load().catch(() => { })
+			await load().catch(() => {})
 		}
 
 		try {
@@ -460,7 +460,7 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			apiOrigin = apiOriginFor(ctx.config.baseUrl)
 
 			if (config.eager === true) {
-				void load().catch(() => { })
+				void load().catch(() => {})
 			}
 
 			return { session: handle }

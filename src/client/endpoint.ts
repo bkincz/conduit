@@ -18,9 +18,9 @@ export interface StandardSchemaV1<Input = unknown, Output = Input> {
 			| { readonly value: Output }
 			| { readonly issues: ReadonlyArray<{ readonly message: string }> }
 			| Promise<
-				| { readonly value: Output }
-				| { readonly issues: ReadonlyArray<{ readonly message: string }> }
-			>
+					| { readonly value: Output }
+					| { readonly issues: ReadonlyArray<{ readonly message: string }> }
+			  >
 	}
 }
 

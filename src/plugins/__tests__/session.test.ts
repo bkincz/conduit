@@ -415,7 +415,7 @@ function fakeContext(baseUrl: string): ClientContext {
 			integrity: undefined,
 			origins: [],
 			redact: [],
-			logger: { warn: () => { }, error: () => { } },
+			logger: { warn: () => {}, error: () => {} },
 		},
 		events: createEventBus(),
 		request: () => {
@@ -424,9 +424,9 @@ function fakeContext(baseUrl: string): ClientContext {
 		dispatch: () => {
 			throw new Error('not used in this test')
 		},
-		abortAll: () => { },
-		resetIdentity: () => { },
-		onResetIdentity: () => () => { },
+		abortAll: () => {},
+		resetIdentity: () => {},
+		onResetIdentity: () => () => {},
 	}
 }
 
@@ -902,7 +902,7 @@ describe('teardown', () => {
 		)
 
 		await client.session.load()
-		client.session.subscribe(() => { })
+		client.session.subscribe(() => {})
 
 		expect(() => client.destroy()).not.toThrow()
 		expect(vi.getTimerCount()).toBe(0)

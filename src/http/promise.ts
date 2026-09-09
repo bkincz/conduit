@@ -1,7 +1,7 @@
 import { toConduitError } from '../primitives/errors'
 import type { ConduitPromise, ConduitResponse, SafeResult } from '../primitives/types'
 
-const swallow = (): void => { }
+const swallow = (): void => {}
 
 /*
  *   CONDUIT PROMISE

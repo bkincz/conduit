@@ -108,7 +108,7 @@ describe('observable', () => {
 	it('never evicts state something is rendering from', async () => {
 		const client = createClient({ fetch: stubFetch(ok).fetch }).with(observable({ max: 1 }))
 
-		client.observe(client.keyFor('/pinned')).subscribe(() => { })
+		client.observe(client.keyFor('/pinned')).subscribe(() => {})
 
 		await client.get('/pinned')
 		await client.get('/a')
@@ -131,7 +131,7 @@ describe('observable', () => {
 		// even though it has no subscriber yet and the cap is already exceeded.
 		expect(client.observedKeys()).toBe(2)
 
-		const off = rendered.subscribe(() => { })
+		const off = rendered.subscribe(() => {})
 
 		await flush()
 
@@ -238,7 +238,7 @@ describe('observable', () => {
 	it('tolerates unsubscribing twice', async () => {
 		const client = createClient({ fetch: stubFetch(ok).fetch }).with(observable())
 
-		const off = client.observe(client.keyFor('/me')).subscribe(() => { })
+		const off = client.observe(client.keyFor('/me')).subscribe(() => {})
 
 		expect(() => {
 			off()

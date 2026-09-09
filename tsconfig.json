@@ -29,7 +29,7 @@
 		"forceConsistentCasingInFileNames": true,
 		"skipLibCheck": true,
 		"resolveJsonModule": true,
-		
+
 		"types": [],
 		"isolatedModules": true,
 		"verbatimModuleSyntax": true,

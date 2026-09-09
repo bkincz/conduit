@@ -263,7 +263,7 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 					write(detached, response, pending)
 				}
 			})
-			.catch(() => { })
+			.catch(() => {})
 			.finally(() => {
 				inFlight.delete(pending)
 				revalidating.delete(request.key)
