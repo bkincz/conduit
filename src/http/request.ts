@@ -28,6 +28,13 @@ export function createRequest(init: RequestRecordInit): ConduitRequest {
 		tags: init.tags,
 		parse: init.parse,
 		credentials: init.credentials,
+		mode: init.mode,
+		redirect: init.redirect,
+		cache: init.cache,
+		keepalive: init.keepalive,
+		priority: init.priority,
+		referrerPolicy: init.referrerPolicy,
+		integrity: init.integrity,
 		meta: init.meta,
 		get headers(): Headers {
 			headers ??= init.buildHeaders()

@@ -1,8 +1,13 @@
 import { CONDUIT_VERSION } from '../primitives/version'
+import { consoleLogger, type ConduitLogger } from '../primitives/types'
 
 /*
  *   TYPES
  ***************************************************************************************************/
+export interface HotContext {
+	dispose(callback: () => void): void
+}
+
 export interface SharedClientOptions {
 	/** The API contract this bundle was built against. Compared, never reconciled. */
 	contract?: number | string
@@ -10,6 +15,18 @@ export interface SharedClientOptions {
 	version?: number
 	/** Routes disagreements somewhere other than the console. */
 	onMismatch?: (report: SharedMismatch) => void
+	/** Where the registry's own diagnostics go. Defaults to `console`. */
+	logger?: ConduitLogger
+	/**
+	 * Tears the client down and deregisters it when this module is about to be
+	 * replaced, so a reload during development gets a fresh client rather than
+	 * a destroyed one wedged in the registry.
+	 *
+	 * ```ts
+	 * sharedClient('acme.api', factory, { hot: import.meta.hot })
+	 * ```
+	 */
+	hot?: HotContext
 }
 
 export type SharedMismatchKind = 'conduit-version' | 'contract' | 'client-version'
@@ -32,7 +49,7 @@ interface SharedEntry {
 /*
  *   REGISTRY
  ***************************************************************************************************/
-const REGISTRY_KEY = '__conduitSharedClients'
+const REGISTRY_KEY = Symbol.for('conduit.sharedClients')
 
 type SharedScope = typeof globalThis & {
 	[REGISTRY_KEY]?: Map<string, SharedEntry>
@@ -49,6 +66,7 @@ function registry(): Map<string, SharedEntry> {
  ***************************************************************************************************/
 interface Destroyable {
 	isDestroyed?: () => boolean
+	destroy?: () => void
 }
 
 /** Duck-typed, since two bundles shipping their own copy have separate class identities. */
@@ -79,6 +97,7 @@ export function sharedClient<C>(
 	factory: () => C,
 	options: SharedClientOptions = {}
 ): C {
+	const logger = options.logger ?? consoleLogger
 	const entries = registry()
 	const existing = entries.get(key)
 
@@ -88,7 +107,7 @@ export function sharedClient<C>(
 	}
 
 	if (existing !== undefined) {
-		console.warn(
+		logger.warn(
 			`[conduit] Shared client "${key}" had been destroyed, so a replacement was built. Whoever calls destroy() on a shared client should call releaseSharedClient("${key}") too.`
 		)
 	}
@@ -102,12 +121,20 @@ export function sharedClient<C>(
 		version: options.version,
 	})
 
+	options.hot?.dispose(() => {
+		const destroyable = client as Destroyable
+		destroyable.destroy?.()
+		releaseSharedClient(key)
+	})
+
 	return client
 }
 
-/** Reads a shared client without creating one. Returns `undefined` if nobody has registered it. */
+/** Reads a shared client without creating one. `undefined` if nobody has registered it, or it was destroyed. */
 export function getSharedClient<C>(key: string): C | undefined {
-	return registry().get(key)?.client as C | undefined
+	const existing = registry().get(key)
+
+	return existing !== undefined && !isSpent(existing.client) ? (existing.client as C) : undefined
 }
 
 /** Deregisters one key. Pair it with `destroy()`, or the next bundle gets the dead client. */
@@ -124,6 +151,8 @@ export function clearSharedClients(): void {
  *   RECONCILE
  ***************************************************************************************************/
 function reconcile(key: string, existing: SharedEntry, options: SharedClientOptions): void {
+	const logger = options.logger ?? consoleLogger
+
 	const report = (
 		kind: SharedMismatchKind,
 		from: string | number | undefined,
@@ -137,7 +166,7 @@ function reconcile(key: string, existing: SharedEntry, options: SharedClientOpti
 			return
 		}
 
-		console.warn(`[conduit] ${message}`)
+		logger.warn(`[conduit] ${message}`)
 	}
 
 	if (existing.conduitVersion !== CONDUIT_VERSION) {

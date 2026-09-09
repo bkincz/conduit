@@ -1,6 +1,7 @@
 import { toConduitError, type ConduitError } from '../primitives/errors'
+import type { Unsubscribe } from '../primitives/events'
 import { createStore, type ReadableStore, type WritableStore } from '../primitives/stores'
-import type { Middleware, Plugin, ResponseSource } from '../primitives/types'
+import type { ConduitRequest, Middleware, Plugin, ResponseSource } from '../primitives/types'
 
 /*
  *   STATE
@@ -16,6 +17,8 @@ export interface QueryState<T> {
 	/** A request for this key is in the air, whether or not there is already data. */
 	readonly fetching: boolean
 	readonly updatedAt: number
+	/** Bumped whenever a cache invalidation or identity reset targets this key. */
+	readonly invalidatedAt: number
 }
 
 export interface ObservableConfig {
@@ -37,6 +40,7 @@ const IDLE: QueryState<never> = {
 	from: undefined,
 	fetching: false,
 	updatedAt: 0,
+	invalidatedAt: 0,
 }
 
 /*
@@ -49,6 +53,9 @@ const IDLE: QueryState<never> = {
 export function observable(config: ObservableConfig = {}): Plugin<ObservableApi> {
 	const max = config.max ?? 200
 	const stores = new Map<string, WritableStore<QueryState<unknown>>>()
+	/** Tags seen on requests for a key, so a `cache:invalidate` tag target can be matched here too. */
+	const tagsByKey = new Map<string, Set<string>>()
+	let generation = 0
 
 	const pending = new Map<string, number>()
 
@@ -71,6 +78,60 @@ export function observable(config: ObservableConfig = {}): Plugin<ObservableApi>
 		return left
 	}
 
+	const trackTags = (request: ConduitRequest): void => {
+		if (request.tags.length === 0) {
+			return
+		}
+
+		let known = tagsByKey.get(request.key)
+
+		if (known === undefined) {
+			known = new Set()
+			tagsByKey.set(request.key, known)
+		}
+
+		for (const tag of request.tags) {
+			known.add(tag)
+		}
+	}
+
+	const wrappers = new Map<string, ReadableStore<QueryState<unknown>>>()
+
+	const forget = (key: string): void => {
+		stores.delete(key)
+		tagsByKey.delete(key)
+		wrappers.delete(key)
+	}
+
+	let sweepTimer: ReturnType<typeof setTimeout> | undefined
+
+	const sweep = (): void => {
+		if (stores.size <= max) {
+			return
+		}
+
+		for (const [key, store] of stores) {
+			if (stores.size <= max) {
+				break
+			}
+
+			if (store.listeners === 0) {
+				forget(key)
+			}
+		}
+	}
+
+	const requestSweep = (): void => {
+		if (sweepTimer !== undefined) {
+			return
+		}
+
+		sweepTimer = setTimeout(() => {
+			sweepTimer = undefined
+			sweep()
+		}, 0)
+	}
+
 	const storeFor = (key: string): WritableStore<QueryState<unknown>> => {
 		const existing = stores.get(key)
 
@@ -81,36 +142,47 @@ export function observable(config: ObservableConfig = {}): Plugin<ObservableApi>
 			return existing
 		}
 
-		evict()
-
 		const created = createStore<QueryState<unknown>>(IDLE)
 		stores.set(key, created)
+
+		if (stores.size > max) {
+			requestSweep()
+		}
 
 		return created
 	}
 
-	const evict = (): void => {
-		while (stores.size >= max) {
-			let victim: string | undefined
+	const bumpOne = (key: string): void => {
+		const store = stores.get(key)
 
-			for (const [key, store] of stores) {
-				if (store.listeners === 0) {
-					victim = key
-					break
-				}
+		if (store === undefined) {
+			return
+		}
+
+		generation++
+		store.update(current => ({ ...current, invalidatedAt: generation }))
+	}
+
+	const bumpAll = (): void => {
+		generation++
+
+		for (const store of stores.values()) {
+			store.update(current => ({ ...current, invalidatedAt: generation }))
+		}
+	}
+
+	const bumpTag = (tag: string): void => {
+		for (const [key, tags] of tagsByKey) {
+			if (tags.has(tag)) {
+				bumpOne(key)
 			}
-
-			if (victim === undefined) {
-				return
-			}
-
-			stores.delete(victim)
 		}
 	}
 
 	const middleware: Middleware = async (request, next) => {
 		const store = storeFor(request.key)
 
+		trackTags(request)
 		enter(request.key)
 
 		store.update(current => ({
@@ -130,6 +202,7 @@ export function observable(config: ObservableConfig = {}): Plugin<ObservableApi>
 				from: response.from,
 				fetching: others > 0,
 				updatedAt: Date.now(),
+				invalidatedAt: store.get().invalidatedAt,
 			})
 
 			return response
@@ -161,28 +234,106 @@ export function observable(config: ObservableConfig = {}): Plugin<ObservableApi>
 		}
 	}
 
-	let release: (() => void) | undefined
+	let releaseReset: (() => void) | undefined
+	let releaseInvalidate: (() => void) | undefined
+	let releaseSet: (() => void) | undefined
 
 	return {
 		name: 'observable',
 		middleware,
 		onInit: ctx => {
-			release = ctx.onResetIdentity(() => {
+			releaseReset = ctx.onResetIdentity(() => {
+				generation++
+
 				for (const store of stores.values()) {
-					store.set(IDLE)
+					store.set({ ...IDLE, invalidatedAt: generation })
 				}
+
+				tagsByKey.clear()
+			})
+
+			releaseInvalidate = ctx.events.on('cache:invalidate', event => {
+				if (event.target === '*') {
+					bumpAll()
+
+					return
+				}
+
+				if (event.target.startsWith('tag:')) {
+					bumpTag(event.target.slice(4))
+
+					return
+				}
+
+				bumpOne(event.target)
+			})
+
+			releaseSet = ctx.events.on('cache:set', event => {
+				const store = stores.get(event.key)
+
+				if (store === undefined) {
+					return
+				}
+
+				store.set({
+					status: 'success',
+					data: event.data,
+					error: undefined,
+					from: 'cache',
+					fetching: false,
+					updatedAt: event.at,
+					invalidatedAt: store.get().invalidatedAt,
+				})
 			})
 
 			return {
-				observe: <T>(key: string): ReadableStore<QueryState<T>> =>
-					storeFor(key) as unknown as ReadableStore<QueryState<T>>,
+				observe: <T>(key: string): ReadableStore<QueryState<T>> => {
+					const store = storeFor(key)
+					const existing = wrappers.get(key)
+
+					if (existing !== undefined) {
+						return existing as unknown as ReadableStore<QueryState<T>>
+					}
+
+					const wrapped: ReadableStore<QueryState<unknown>> = {
+						get: () => store.get(),
+						subscribe: listener => {
+							const off = store.subscribe(listener)
+							let released = false
+
+							const unsubscribe: Unsubscribe = () => {
+								if (released) {
+									return
+								}
+
+								released = true
+								off()
+								requestSweep()
+							}
+
+							return unsubscribe
+						},
+					}
+
+					wrappers.set(key, wrapped)
+
+					return wrapped as unknown as ReadableStore<QueryState<T>>
+				},
 				observedKeys: (): number => stores.size,
 			}
 		},
 		onDestroy: () => {
-			release?.()
-			release = undefined
+			releaseReset?.()
+			releaseReset = undefined
+			releaseInvalidate?.()
+			releaseInvalidate = undefined
+			releaseSet?.()
+			releaseSet = undefined
+			wrappers.clear()
+			clearTimeout(sweepTimer)
+			sweepTimer = undefined
 			stores.clear()
+			tagsByKey.clear()
 			pending.clear()
 		},
 	}

@@ -42,11 +42,10 @@ const RETRYABLE_STATUSES: readonly number[] = [408, 425, 429, 500, 502, 503, 504
 /*
  *   RETRY-AFTER
  ***************************************************************************************************/
-/** Honours the server's own instruction, in either of the two formats it may use. */
 function retryAfter(error: ConduitError): number | undefined {
 	const header = error.headers?.get('retry-after')
 
-	if (header === undefined || header === null) {
+	if (header === undefined || header === null || header.trim() === '') {
 		return undefined
 	}
 
@@ -59,6 +58,14 @@ function retryAfter(error: ConduitError): number | undefined {
 	const date = Date.parse(header)
 
 	return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now())
+}
+
+function bodyExhausted(request: ConduitRequest): boolean {
+	return (
+		typeof ReadableStream !== 'undefined' &&
+		request.body instanceof ReadableStream &&
+		request.body.locked
+	)
 }
 
 /*
@@ -103,6 +110,10 @@ export function retry(config: RetryConfig = {}): Plugin {
 	let events: EventBus | undefined
 
 	const retryable = (error: ConduitError, request: ConduitRequest, attempt: number): boolean => {
+		if (bodyExhausted(request)) {
+			return false
+		}
+
 		if (config.shouldRetry !== undefined) {
 			return config.shouldRetry(error, request, attempt)
 		}
@@ -155,6 +166,11 @@ export function retry(config: RetryConfig = {}): Plugin {
 				return await next(request)
 			} catch (cause) {
 				const error = toConduitError(cause)
+				const after = retryAfter(error)
+
+				if (after !== undefined) {
+					error.retryAfter = after
+				}
 
 				if (attempt >= attempts || !retryable(error, request, attempt)) {
 					throw error

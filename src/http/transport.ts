@@ -1,4 +1,5 @@
 import { toAbortError } from './abort'
+import { stripQuery } from './url'
 import { ConduitError, isConduitError } from '../primitives/errors'
 import type {
 	ConduitRequest,
@@ -7,6 +8,20 @@ import type {
 	ParseMode,
 	ResolvedClientConfig,
 } from '../primitives/types'
+
+/*
+ *   FETCH SHIM
+ ***************************************************************************************************/
+declare global {
+	interface RequestInit {
+		/**
+		 * Required by the fetch spec when `body` is a `ReadableStream`. TS's DOM
+		 * lib does not know this field yet, so it is declared here rather than
+		 * left as a cast at the one place that needs it.
+		 */
+		duplex?: 'half'
+	}
+}
 
 /*
  *   DECODE
@@ -84,9 +99,15 @@ async function decode(
 			return undefined
 		}
 
+		// The signal can abort mid-read.
+		// that is a cancellation, not a body that failed to parse.
+		if (request.signal.aborted) {
+			throw toAbortError(request, cause)
+		}
+
 		throw new ConduitError({
 			code: 'PARSE',
-			message: `${request.method} ${request.url} returned a body that could not be read as ${mode}.`,
+			message: `${request.method} ${stripQuery(request.url)} returned a body that could not be read as ${mode}.`,
 			method: request.method,
 			url: request.url,
 			owner: request.owner,
@@ -100,10 +121,6 @@ async function decode(
  *   FAILURE MAPPING
  ***************************************************************************************************/
 function transportError(cause: unknown, request: ConduitRequest): ConduitError {
-	if (request.signal.aborted && isConduitError(request.signal.reason)) {
-		return request.signal.reason
-	}
-
 	if (isConduitError(cause)) {
 		return cause
 	}
@@ -113,7 +130,7 @@ function transportError(cause: unknown, request: ConduitRequest): ConduitError {
 	if (name === 'TimeoutError') {
 		return new ConduitError({
 			code: 'TIMEOUT',
-			message: `${request.method} ${request.url} timed out.`,
+			message: `${request.method} ${stripQuery(request.url)} timed out.`,
 			method: request.method,
 			url: request.url,
 			owner: request.owner,
@@ -127,7 +144,7 @@ function transportError(cause: unknown, request: ConduitRequest): ConduitError {
 
 	return new ConduitError({
 		code: 'NETWORK',
-		message: `${request.method} ${request.url} never reached a server. The network, DNS, CORS or TLS is at fault, not the response.`,
+		message: `${request.method} ${stripQuery(request.url)} never reached a server. The network, DNS, CORS or TLS is at fault, not the response.`,
 		method: request.method,
 		url: request.url,
 		owner: request.owner,
@@ -149,10 +166,42 @@ export function createFetchTransport(config: ResolvedClientConfig): Next {
 
 		if (request.body !== null) {
 			init.body = request.body
+
+			if (typeof ReadableStream !== 'undefined' && request.body instanceof ReadableStream) {
+				init.duplex = 'half'
+			}
 		}
 
 		if (request.credentials !== undefined) {
 			init.credentials = request.credentials
+		}
+
+		if (request.mode !== undefined) {
+			init.mode = request.mode
+		}
+
+		if (request.redirect !== undefined) {
+			init.redirect = request.redirect
+		}
+
+		if (request.cache !== undefined) {
+			init.cache = request.cache
+		}
+
+		if (request.keepalive !== undefined) {
+			init.keepalive = request.keepalive
+		}
+
+		if (request.priority !== undefined) {
+			init.priority = request.priority
+		}
+
+		if (request.referrerPolicy !== undefined) {
+			init.referrerPolicy = request.referrerPolicy
+		}
+
+		if (request.integrity !== undefined) {
+			init.integrity = request.integrity
 		}
 
 		let response: Response
@@ -167,7 +216,7 @@ export function createFetchTransport(config: ResolvedClientConfig): Next {
 			throw new ConduitError({
 				code: 'HTTP_ERROR',
 				message:
-					`${request.method} ${request.url} failed with ${response.status} ${response.statusText}`.trimEnd(),
+					`${request.method} ${stripQuery(request.url)} failed with ${response.status} ${response.statusText}`.trimEnd(),
 				method: request.method,
 				url: request.url,
 				owner: request.owner,

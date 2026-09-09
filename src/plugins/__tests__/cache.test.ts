@@ -221,6 +221,81 @@ describe('cache', () => {
 		expect(seen).toEqual(['cache:miss', 'cache:hit', 'cache:invalidate'])
 	})
 
+	it('meta.cache "refresh" skips the read but still stores what comes back', async () => {
+		let version = 1
+		const stub = stubFetch(() => jsonResponse({ version: version++ }))
+		const client = createClient({ fetch: stub.fetch }).with(cache())
+
+		await client.get('/me')
+		expect(stub.calls).toHaveLength(1)
+
+		const refreshed = await client.get('/me', { meta: { cache: 'refresh' } }).response()
+
+		expect(refreshed.from).toBe('network')
+		expect(refreshed.data).toEqual({ version: 2 })
+		expect(stub.calls).toHaveLength(2)
+
+		const after = await client.get('/me').response()
+
+		expect(after.from).toBe('cache')
+		expect(after.data).toEqual({ version: 2 })
+		expect(stub.calls).toHaveLength(2)
+	})
+
+	it('does not bypass entirely: "refresh" still respects shouldCache', async () => {
+		const stub = stubFetch(ok)
+		const client = createClient({ fetch: stub.fetch }).with(cache())
+
+		await client.post('/things', { a: 1 }, { meta: { cache: 'refresh' } })
+
+		expect(client.cacheSize()).toBe(0)
+	})
+
+	it('writes a value directly and returns the previous one for rollback', async () => {
+		const stub = stubFetch(ok)
+		const client = createClient({ fetch: stub.fetch }).with(cache())
+
+		await client.get('/me')
+
+		const previous = client.setData<{ id: number }>(client.keyFor('/me'), { id: 99 })
+
+		expect(previous).toEqual({ id: 1 })
+
+		const after = await client.get('/me').response()
+
+		expect(after.from).toBe('cache')
+		expect(after.data).toEqual({ id: 99 })
+		expect(stub.calls).toHaveLength(1)
+	})
+
+	it('setData takes an updater and can create an entry that did not exist', async () => {
+		const client = createClient({ fetch: stubFetch(ok).fetch }).with(cache())
+
+		const previous = client.setData<{ id: number }>('GET /new', current => ({
+			id: (current?.id ?? 0) + 1,
+		}))
+
+		expect(previous).toBeUndefined()
+		expect(client.cacheSize()).toBe(1)
+
+		const created = client.setData<{ id: number }>('GET /new', current => ({
+			id: (current?.id ?? 0) + 1,
+		}))
+
+		expect(created).toEqual({ id: 1 })
+	})
+
+	it('reports a cache:set event', async () => {
+		const client = createClient({ fetch: stubFetch(ok).fetch }).with(cache())
+		const seen = vi.fn()
+
+		client.events.on('cache:set', seen)
+		client.setData('GET /x', { id: 1 })
+
+		expect(seen).toHaveBeenCalledOnce()
+		expect(seen.mock.calls[0]?.[0]).toMatchObject({ key: 'GET /x', data: { id: 1 } })
+	})
+
 	it('reports a stale read separately from a hit', async () => {
 		const client = createClient({ fetch: stubFetch(ok).fetch }).with(
 			cache({ ttl: 0, staleWhileRevalidate: true })
@@ -235,5 +310,29 @@ describe('cache', () => {
 
 		expect(stale).toHaveBeenCalledOnce()
 		expect(stale.mock.calls[0]?.[0]).toMatchObject({ revalidating: true })
+	})
+})
+
+describe('cache defaults', () => {
+	it('stores a tagged POST, so an invalidation can reach it', async () => {
+		const stub = stubFetch(ok)
+		const client = createClient({ fetch: stub.fetch }).with(cache())
+
+		await client.post('/search', { q: 'a' }, { tags: ['search'] })
+		await client.post('/search', { q: 'a' }, { tags: ['search'] })
+		expect(stub.calls).toHaveLength(1)
+
+		client.invalidateTag('search')
+		await client.post('/search', { q: 'a' }, { tags: ['search'] })
+		expect(stub.calls).toHaveLength(2)
+	})
+
+	it('still skips an untagged POST', async () => {
+		const stub = stubFetch(ok)
+		const client = createClient({ fetch: stub.fetch }).with(cache())
+
+		await client.post('/search', { q: 'a' })
+		await client.post('/search', { q: 'a' })
+		expect(stub.calls).toHaveLength(2)
 	})
 })

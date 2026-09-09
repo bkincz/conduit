@@ -1,6 +1,6 @@
 {
 	"name": "@bkincz/conduit",
-	"version": "1.0.0",
+	"version": "2.0.0",
 	"description": "Data-fetching client for micro frontends: one shared client across every bundle on the page",
 	"type": "module",
 	"main": "./dist/index.cjs",
@@ -69,7 +69,8 @@
 		"test:coverage": "vitest run --coverage",
 		"bench": "vitest bench --run",
 		"size": "size-limit",
-		"verify": "pnpm run type-check && pnpm run lint && pnpm run test:coverage && pnpm run build && pnpm run size",
+		"check:api": "tsc -p tsconfig.public-api.json --noEmit",
+		"verify": "pnpm run type-check && pnpm run lint && pnpm run test:coverage && pnpm run build && pnpm run check:api && pnpm run size",
 		"prepublishOnly": "pnpm run verify"
 	},
 	"peerDependencies": {
@@ -105,19 +106,19 @@
 		{
 			"name": "Full bundle",
 			"path": "dist/index.js",
-			"limit": "12 KB"
+			"limit": "12.5 KB"
 		},
 		{
 			"name": "Core only",
 			"path": "dist/index.js",
 			"import": "{ createClient }",
-			"limit": "4.5 KB"
+			"limit": "6.5 KB"
 		},
 		{
 			"name": "Core + common plugins",
 			"path": "dist/index.js",
 			"import": "{ createClient, sharedClient, cache, dedupe, retry, timeout, queue }",
-			"limit": "9 KB"
+			"limit": "10 KB"
 		},
 		{
 			"name": "Errors only",
@@ -128,7 +129,7 @@
 		{
 			"name": "React bindings",
 			"path": "dist/react.js",
-			"limit": "2 KB"
+			"limit": "2.5 KB"
 		},
 		{
 			"name": "Devtools",

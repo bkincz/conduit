@@ -1,6 +1,6 @@
 import { DEV } from '../primitives/dev'
 import { ConduitError } from '../primitives/errors'
-import type { PathParams, Query } from '../primitives/types'
+import { consoleLogger, type ConduitLogger, type PathParams, type Query } from '../primitives/types'
 
 /*
  *   PATH PARAMS
@@ -13,7 +13,11 @@ import type { PathParams, Query } from '../primitives/types'
 const PARAM_PATTERN = /(^|\/)(::?)([A-Za-z_][A-Za-z0-9_]*)/g
 
 /** Substitutes `:name` placeholders. A missing value is a `CONFIG` error, not a 404. */
-export function applyPathParams(path: string, params: PathParams | undefined): string {
+export function applyPathParams(
+	path: string,
+	params: PathParams | undefined,
+	logger: ConduitLogger = consoleLogger
+): string {
 	const mark = path.indexOf('?')
 	const head = mark === -1 ? path : path.slice(0, mark)
 	const tail = mark === -1 ? '' : path.slice(mark)
@@ -22,7 +26,7 @@ export function applyPathParams(path: string, params: PathParams | undefined): s
 
 	if (!PARAM_PATTERN.test(head)) {
 		if (DEV && params !== undefined && Object.keys(params).length > 0) {
-			console.warn(
+			logger.warn(
 				`[conduit] "${path}" was given params ${JSON.stringify(Object.keys(params))} but contains no ":name" placeholders. Did you mean to pass them as "query"?`
 			)
 		}
@@ -39,7 +43,8 @@ export function applyPathParams(path: string, params: PathParams | undefined): s
 				return `${prefix}:${name}`
 			}
 
-			const value = params?.[name]
+			const value =
+				params !== undefined && Object.hasOwn(params, name) ? params[name] : undefined
 
 			if (value === undefined) {
 				throw new ConduitError({
@@ -49,7 +54,17 @@ export function applyPathParams(path: string, params: PathParams | undefined): s
 				})
 			}
 
-			return `${prefix}${encodeURIComponent(String(value))}`
+			const text = String(value)
+
+			if (text.trim() === '') {
+				throw new ConduitError({
+					code: 'CONFIG',
+					message: `Path "${path}" was given an empty value for ":${name}". An empty path segment is rarely what was meant; pass a real value or drop the placeholder.`,
+					url: path,
+				})
+			}
+
+			return `${prefix}${encodeURIComponent(text)}`
 		}
 	)
 
@@ -59,7 +74,6 @@ export function applyPathParams(path: string, params: PathParams | undefined): s
 /*
  *   QUERY
  ***************************************************************************************************/
-/** Appends query values in order. `undefined` and `null` are dropped, arrays repeat the key. */
 export function appendQuery(url: string, query: Query | undefined): string {
 	if (query === undefined) {
 		return url
@@ -90,7 +104,13 @@ export function appendQuery(url: string, query: Query | undefined): string {
 		return url
 	}
 
-	return url + (url.includes('?') ? '&' : '?') + serialised
+	// The query belongs before the fragment, not after it: "#x?y" would send
+	// the query as part of the fragment instead of the wire.
+	const hashMark = url.indexOf('#')
+	const head = hashMark === -1 ? url : url.slice(0, hashMark)
+	const hash = hashMark === -1 ? '' : url.slice(hashMark)
+
+	return head + (head.includes('?') ? '&' : '?') + serialised + hash
 }
 
 /*
@@ -98,13 +118,71 @@ export function appendQuery(url: string, query: Query | undefined): string {
  ***************************************************************************************************/
 const ABSOLUTE_PATTERN = /^([a-z][a-z0-9+.-]*:)?\/\//i
 
+const NO_ORIGINS: readonly string[] = Object.freeze([])
+
 export function isAbsoluteUrl(url: string): boolean {
 	return ABSOLUTE_PATTERN.test(url)
 }
 
-/** Joins base and path with exactly one slash. An absolute path ignores the base. */
-export function joinUrl(baseUrl: string, path: string): string {
-	if (baseUrl === '' || isAbsoluteUrl(path)) {
+export function stripQuery(url: string): string {
+	const mark = url.indexOf('?')
+
+	return mark === -1 ? url : url.slice(0, mark)
+}
+
+/*
+ *   ORIGIN GUARD
+ ***************************************************************************************************/
+function pageOrigin(): string | undefined {
+	return typeof globalThis.location === 'object' ? globalThis.location.origin : undefined
+}
+
+function originOf(url: string): string | undefined {
+	try {
+		return new URL(url, pageOrigin()).origin
+	} catch {
+		return undefined
+	}
+}
+
+function apiOrigin(baseUrl: string): string | undefined {
+	return isAbsoluteUrl(baseUrl) ? originOf(baseUrl) : pageOrigin()
+}
+
+function assertAllowedOrigin(url: string, baseUrl: string, origins: readonly string[]): void {
+	const target = originOf(url)
+
+	if (target !== undefined && (target === apiOrigin(baseUrl) || origins.includes(target))) {
+		return
+	}
+
+	throw new ConduitError({
+		code: 'CONFIG',
+		message: `"${stripQuery(url)}" leaves the origins this client is allowed to call. Add it to config.origins if this is intentional.`,
+		url,
+	})
+}
+
+export function joinUrl(
+	baseUrl: string,
+	path: string,
+	origins: readonly string[] = NO_ORIGINS
+): string {
+	if (path.startsWith('//')) {
+		throw new ConduitError({
+			code: 'CONFIG',
+			message: `"${stripQuery(path)}" is protocol-relative, which silently follows whatever scheme the page is on. Use an absolute url with an explicit scheme, or a relative one.`,
+			url: path,
+		})
+	}
+
+	if (isAbsoluteUrl(path)) {
+		assertAllowedOrigin(path, baseUrl, origins)
+
+		return path
+	}
+
+	if (baseUrl === '') {
 		return path
 	}
 
@@ -121,7 +199,9 @@ export function buildUrl(
 	baseUrl: string,
 	path: string,
 	params: PathParams | undefined,
-	query: Query | undefined
+	query: Query | undefined,
+	origins: readonly string[] = NO_ORIGINS,
+	logger: ConduitLogger = consoleLogger
 ): string {
-	return appendQuery(joinUrl(baseUrl, applyPathParams(path, params)), query)
+	return appendQuery(joinUrl(baseUrl, applyPathParams(path, params, logger), origins), query)
 }

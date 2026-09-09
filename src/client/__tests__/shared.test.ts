@@ -12,9 +12,11 @@ afterEach(() => {
 	vi.restoreAllMocks()
 })
 
+const REGISTRY_KEY = Symbol.for('conduit.sharedClients')
+
 function seedRegistry(key: string, entry: Record<string, unknown>): void {
-	const scope = globalThis as unknown as Record<string, Map<string, unknown>>
-	scope['__conduitSharedClients']?.set(key, entry)
+	const scope = globalThis as unknown as Record<symbol, Map<string, unknown>>
+	scope[REGISTRY_KEY]?.set(key, entry)
 }
 
 describe('sharedClient', () => {
@@ -56,6 +58,40 @@ describe('sharedClient', () => {
 		const client = sharedClient('api', () => createClient({ fetch: stubFetch(ok).fetch }))
 
 		expect(getSharedClient('api')).toBe(client)
+	})
+
+	it('stops handing out a client once it has been destroyed', () => {
+		const client = sharedClient('api', () => createClient({ fetch: stubFetch(ok).fetch }))
+
+		client.destroy()
+
+		expect(getSharedClient('api')).toBeUndefined()
+	})
+})
+
+describe('sharedClient hot', () => {
+	it('does nothing when no hot context is given', () => {
+		expect(() =>
+			sharedClient('api', () => createClient({ fetch: stubFetch(ok).fetch }))
+		).not.toThrow()
+	})
+
+	it('tears the client down and deregisters it when the module is about to be replaced', () => {
+		let dispose: (() => void) | undefined
+		const client = sharedClient('api', () => createClient({ fetch: stubFetch(ok).fetch }), {
+			hot: {
+				dispose: callback => {
+					dispose = callback
+				},
+			},
+		})
+
+		expect(client.isDestroyed()).toBe(false)
+
+		dispose?.()
+
+		expect(client.isDestroyed()).toBe(true)
+		expect(getSharedClient('api')).toBeUndefined()
 	})
 })
 

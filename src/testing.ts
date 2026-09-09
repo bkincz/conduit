@@ -230,9 +230,8 @@ export function createMockServer(config: MockServerConfig = {}): MockServer {
 			return Promise.reject(
 				new ConduitError({
 					code: 'CONFIG',
-					message: `No route for ${method} ${path}. Registered: ${
-						routes.length === 0 ? '(none)' : routes.map(route => route.label).join(', ')
-					}`,
+					message: `No route for ${method} ${path}. Registered: ${routes.length === 0 ? '(none)' : routes.map(route => route.label).join(', ')
+						}`,
 					method,
 					url,
 				})
@@ -277,7 +276,7 @@ async function answer(responder: MockResponder, request: MockRequest): Promise<R
 	const result: unknown = typeof responder === 'function' ? await responder(request) : responder
 
 	if (result instanceof Response) {
-		return result
+		return result.clone()
 	}
 
 	if (result instanceof Error) {

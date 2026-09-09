@@ -11,6 +11,7 @@
  * - `PARSE`: a body arrived but could not be decoded as declared.
  * - `UNAUTHENTICATED`: the session is gone and cannot be recovered.
  * - `CONFIG`: conduit was set up wrong. Always a developer error.
+ * - `SCHEMA`: an endpoint's `response` schema rejected the decoded body.
  * - `UNKNOWN`: something threw that conduit cannot classify.
  */
 export const ERROR_CODES = [
@@ -21,6 +22,7 @@ export const ERROR_CODES = [
 	'PARSE',
 	'UNAUTHENTICATED',
 	'CONFIG',
+	'SCHEMA',
 	'UNKNOWN',
 ] as const
 
@@ -41,6 +43,8 @@ export interface ConduitErrorInit {
 	headers?: Headers | undefined
 	/** Decoded response body, when the failure came from a response conduit could read. */
 	body?: unknown
+	/** Milliseconds the server asked to wait, when the response carried `Retry-After`. */
+	retryAfter?: number
 	cause?: unknown
 }
 
@@ -70,9 +74,16 @@ export class ConduitError extends Error {
 	public readonly status: number | undefined
 	/** The app or remote that issued the request, which the shared stack trace cannot say. */
 	public readonly owner: string | undefined
-	/** Kept off {@link ConduitError.toJSON}, with `body`. Both can carry user data. */
-	public readonly headers: Headers | undefined
-	public readonly body: unknown
+	/** Milliseconds the server asked to wait, from `Retry-After`. The retry plugin fills it in. */
+	public retryAfter: number | undefined
+	/**
+	 * Kept off {@link ConduitError.toJSON}, with `body`. Both can carry user
+	 * data, so both are also non-enumerable: still readable directly, but
+	 * absent from `{...error}`, `console.table`, and anything else that walks
+	 * enumerable properties instead of naming them.
+	 */
+	declare readonly headers: Headers | undefined
+	declare readonly body: unknown
 
 	constructor(init: ConduitErrorInit) {
 		super(init.message)
@@ -82,8 +93,10 @@ export class ConduitError extends Error {
 		this.url = init.url
 		this.status = init.status
 		this.owner = init.owner
-		this.headers = init.headers
-		this.body = init.body
+		this.retryAfter = init.retryAfter
+
+		Object.defineProperty(this, 'headers', { value: init.headers, configurable: true })
+		Object.defineProperty(this, 'body', { value: init.body, configurable: true })
 
 		if (init.cause !== undefined) {
 			this.cause = init.cause

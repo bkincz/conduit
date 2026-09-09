@@ -148,6 +148,27 @@ describe('createMockServer', () => {
 		expect((await api.get('/nothing').safe()).error?.status).toBe(404)
 	})
 
+	it('answers more than once from a single Response responder', async () => {
+		const server = createMockServer()
+		server.post('/things', status(201, { written: true }))
+
+		const api = createClient({ fetch: server.fetch })
+
+		await expect(api.post('/things', {})).resolves.toEqual({ written: true })
+		await expect(api.post('/things', {})).resolves.toEqual({ written: true })
+	})
+
+	it('answers more than once when a function responder returns the same Response instance', async () => {
+		const server = createMockServer()
+		const shared = status(200, { hits: 1 })
+		server.get('/shared', () => shared)
+
+		const api = createClient({ fetch: server.fetch })
+
+		await expect(api.get('/shared')).resolves.toEqual({ hits: 1 })
+		await expect(api.get('/shared')).resolves.toEqual({ hits: 1 })
+	})
+
 	it('resets routes and calls', async () => {
 		const server = createMockServer()
 		server.get('/me', { id: 1 })
