@@ -1,7 +1,7 @@
 /*
  *   CLIENT
  ***************************************************************************************************/
-export { Client, createClient } from './client/core'
+export { Client, createClient, redactRequest, DEFAULT_REDACTED_HEADERS } from './client/core'
 export { defaults } from './client/defaults'
 export type { DefaultsConfig, DefaultsWithSession, DefaultStack } from './client/defaults'
 export { createScope } from './client/scopes'
@@ -14,7 +14,14 @@ export {
 	releaseSharedClient,
 	clearSharedClients,
 } from './client/shared'
-export type { SharedClientOptions, SharedMismatch, SharedMismatchKind } from './client/shared'
+export type {
+	HotContext,
+	SharedClientOptions,
+	SharedMismatch,
+	SharedMismatchKind,
+} from './client/shared'
+export { defineEndpoint, resolveEndpointTags } from './client/endpoint'
+export type { Endpoint, EndpointDefinition, StandardSchemaV1 } from './client/endpoint'
 
 /*
  *   PLUGINS
@@ -61,12 +68,21 @@ export {
 	fnv1a,
 } from './http/keys'
 export type { KeyInputs } from './http/keys'
-export { buildUrl, joinUrl, appendQuery, applyPathParams, isAbsoluteUrl } from './http/url'
+export {
+	buildUrl,
+	joinUrl,
+	appendQuery,
+	applyPathParams,
+	isAbsoluteUrl,
+	stripQuery,
+} from './http/url'
 export { encodeBody } from './http/body'
 export type { EncodedBody } from './http/body'
 export { composeSignals } from './http/signals'
 export type { ComposedSignal } from './http/signals'
 export { toAbortError } from './http/abort'
+export { createXhrFetch } from './http/xhr'
+export type { UploadProgressEvent, XhrFetchOptions } from './http/xhr'
 
 /*
  *   PRIMITIVES
@@ -104,10 +120,12 @@ export { createStore } from './primitives/stores'
 export type { ReadableStore, WritableStore } from './primitives/stores'
 export { protect } from './primitives/freeze'
 export { CONDUIT_VERSION } from './primitives/version'
-export { IDEMPOTENT_METHODS } from './primitives/types'
+export { IDEMPOTENT_METHODS, consoleLogger } from './primitives/types'
 export type {
 	ClientConfig,
 	ClientContext,
+	ConduitLogger,
+	ConduitMeta,
 	ConduitPromise,
 	ConduitRequest,
 	ConduitResponse,
@@ -124,6 +142,7 @@ export type {
 	Plugin,
 	Query,
 	QueryValue,
+	RequestInitPassthrough,
 	RequestMethods,
 	RequestOptions,
 	RequestPatch,

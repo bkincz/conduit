@@ -54,7 +54,42 @@ export type PathParams = Readonly<Record<string, string | number>>
 /** How to decode a response body. `auto` reads the content type. */
 export type ParseMode = 'auto' | 'json' | 'text' | 'blob' | 'arrayBuffer' | 'formData' | 'none'
 
-export interface RequestOptions {
+/*
+ *   META
+ ***************************************************************************************************/
+/**
+ * Plugin scratch space, carried through the pipeline untouched by the core.
+ * Declaration-merge to give your own keys a real type instead of `unknown`:
+ *
+ * ```ts
+ * declare module '@bkincz/conduit' {
+ * 	interface ConduitMeta {
+ * 		'my-plugin.skip'?: boolean
+ * 	}
+ * }
+ * ```
+ */
+export interface ConduitMeta {
+	[key: string]: unknown
+}
+
+/**
+ * `RequestInit` fields conduit passes straight through rather than deriving
+ * itself. Shared by `ClientConfig` and `RequestOptions`; a request sets a
+ * field, the client supplies a default. `duplex` is excluded: it is inferred
+ * from the body, not something a caller sets.
+ */
+export interface RequestInitPassthrough {
+	mode?: RequestMode
+	redirect?: RequestRedirect
+	cache?: RequestCache
+	keepalive?: boolean
+	priority?: RequestPriority
+	referrerPolicy?: ReferrerPolicy
+	integrity?: string
+}
+
+export interface RequestOptions extends RequestInitPassthrough {
 	method?: HttpMethod
 	/** Fills `:name` placeholders. A missing one is a config error, not a 404. */
 	params?: PathParams
@@ -70,8 +105,7 @@ export interface RequestOptions {
 	tags?: readonly string[]
 	parse?: ParseMode
 	credentials?: RequestCredentials
-	/** Plugin scratch space, carried through the pipeline untouched by the core. */
-	meta?: Record<string, unknown>
+	meta?: ConduitMeta
 }
 
 /** `RequestOptions` minus the parts a method helper already decides for you. */
@@ -95,8 +129,15 @@ export interface ConduitRequest {
 	readonly tags: readonly string[]
 	readonly parse: ParseMode
 	readonly credentials: RequestCredentials | undefined
+	readonly mode: RequestMode | undefined
+	readonly redirect: RequestRedirect | undefined
+	readonly cache: RequestCache | undefined
+	readonly keepalive: boolean | undefined
+	readonly priority: RequestPriority | undefined
+	readonly referrerPolicy: ReferrerPolicy | undefined
+	readonly integrity: string | undefined
 	/** Mutable by design: plugins stash state here across the onion. */
-	readonly meta: Record<string, unknown>
+	readonly meta: ConduitMeta
 }
 
 /**
@@ -163,11 +204,26 @@ export interface Plugin<Ext extends object = EmptyExtension> {
 }
 
 /*
+ *   LOGGING
+ ***************************************************************************************************/
+/** What `ClientConfig.logger` must implement. Defaults to `console`. */
+export interface ConduitLogger {
+	warn(message: string): void
+	error(message: string): void
+}
+
+/** Calls through to `console` fresh on every message, so a test spy still sees it. */
+export const consoleLogger: ConduitLogger = {
+	warn: message => console.warn(message),
+	error: message => console.error(message),
+}
+
+/*
  *   CLIENT
  ***************************************************************************************************/
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>
 
-export interface ClientConfig {
+export interface ClientConfig extends RequestInitPassthrough {
 	/** Prefixed to every relative path. Absolute urls bypass it. */
 	baseUrl?: string
 	/** Pass a function for anything that changes at runtime. It is read per request. */
@@ -181,6 +237,21 @@ export interface ClientConfig {
 	parse?: ParseMode
 	/** Swap the network implementation, for tests, instrumentation or a non-browser host. */
 	fetch?: FetchLike
+	/**
+	 * Extra origins this client may call besides its own. `baseUrl`'s origin is
+	 * always allowed; a relative `baseUrl` means the page's own origin. Every
+	 * other absolute request is rejected with `CONFIG` before any plugin runs,
+	 * and a protocol-relative url (`//host/…`) is always rejected.
+	 */
+	origins?: string[]
+	/**
+	 * Header names hidden from `.response()` and from event listeners. The
+	 * plugin pipeline still sees the real request. Defaults to `['authorization',
+	 * 'cookie', 'proxy-authorization']`.
+	 */
+	redact?: string[]
+	/** Where conduit's own diagnostics go. Defaults to `console`. */
+	logger?: ConduitLogger
 }
 
 export interface ResolvedClientConfig {
@@ -192,6 +263,16 @@ export interface ResolvedClientConfig {
 	readonly lane: Lane
 	readonly parse: ParseMode
 	readonly fetch: FetchLike
+	readonly mode: RequestMode | undefined
+	readonly redirect: RequestRedirect | undefined
+	readonly cache: RequestCache | undefined
+	readonly keepalive: boolean | undefined
+	readonly priority: RequestPriority | undefined
+	readonly referrerPolicy: ReferrerPolicy | undefined
+	readonly integrity: string | undefined
+	readonly origins: readonly string[]
+	readonly redact: readonly string[]
+	readonly logger: ConduitLogger
 }
 
 /** What a plugin is handed at install time. */

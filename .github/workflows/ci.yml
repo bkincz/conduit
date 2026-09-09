@@ -71,6 +71,9 @@ jobs:
             - name: Build
               run: pnpm run build
 
+            - name: Public API check
+              run: pnpm run check:api
+
             - name: Size limit
               run: pnpm run size
 

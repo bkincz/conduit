@@ -1,0 +1,19 @@
+{
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"types": ["react"],
+		"skipLibCheck": false,
+		"isolatedDeclarations": false,
+		"declaration": false,
+		"noUnusedLocals": false,
+		"baseUrl": ".",
+		"paths": {
+			"@bkincz/conduit": ["./dist/index.d.ts"],
+			"@bkincz/conduit/react": ["./dist/react.d.ts"],
+			"@bkincz/conduit/devtools": ["./dist/devtools.d.ts"],
+			"@bkincz/conduit/testing": ["./dist/testing.d.ts"]
+		}
+	},
+	"include": ["test/public-api"]
+}

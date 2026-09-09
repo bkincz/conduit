@@ -1,5 +1,6 @@
-import { toConduitError, type ConduitError } from '../primitives/errors'
+import { toConduitError, ConduitError } from '../primitives/errors'
 import type { EventBus, Unsubscribe } from '../primitives/events'
+import { isAbsoluteUrl } from '../http/url'
 import type {
 	ClientContext,
 	ConduitPromise,
@@ -39,12 +40,20 @@ export interface SessionAdapter<S = unknown> {
 	expiresAt?(session: S): number | undefined
 	/** Attempts recovery. `false` gives up. Absent means unauthenticated is terminal. */
 	renew?(ctx: AdapterContext): Promise<boolean>
+	/**
+	 * A stable id for whoever is signed in. Compared on every successful `load`
+	 * or `renew`; a change resets everything identity-scoped, not only the
+	 * authenticated/anonymous flip.
+	 */
+	identify?(session: S): string | undefined
+	/** Called after `clear()` and after a terminal failure, once local state is already gone. */
+	onClear?(): void
 }
 
 /*
  *   STATE
  ***************************************************************************************************/
-export type SessionStatus = 'unknown' | 'loading' | 'authenticated' | 'anonymous'
+export type SessionStatus = 'unknown' | 'loading' | 'authenticated' | 'anonymous' | 'error'
 
 export interface SessionState<S> {
 	readonly status: SessionStatus
@@ -76,15 +85,45 @@ export interface SessionConfig<S = unknown> {
 	eager?: boolean
 	/** Re-read this long before `expiresAt`. Defaults to 60 seconds. */
 	refreshLeeway?: number
+	/**
+	 * Extra origins, beyond the client's own, that also receive credentials.
+	 * A request to anything else passes through unauthorized.
+	 */
+	origins?: readonly string[]
 }
 
-/** Marks conduit's own session traffic, so the middleware ignores it. */
 export const SESSION_META = 'conduit.session'
 
 const UNAUTHORISED = 401
-
-/** `setTimeout` takes a 32-bit signed delay. Anything longer wraps and fires immediately. */
 const MAX_DELAY = 2_147_483_647
+const DEFAULT_IDENTITY = 'conduit.session.authenticated'
+
+/*
+ *   ORIGIN
+ ***************************************************************************************************/
+function originOf(url: string): string {
+	if (!isAbsoluteUrl(url)) {
+		return ''
+	}
+
+	try {
+		return new URL(url).origin
+	} catch {
+		return ''
+	}
+}
+
+function apiOriginFor(baseUrl: string): string {
+	if (isAbsoluteUrl(baseUrl)) {
+		try {
+			return new URL(baseUrl).origin
+		} catch {
+			return ''
+		}
+	}
+
+	return typeof location === 'undefined' ? '' : location.origin
+}
 
 /*
  *   PLUGIN
@@ -97,6 +136,7 @@ const MAX_DELAY = 2_147_483_647
 export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionApi<S>> {
 	const adapter = config.adapter
 	const leeway = config.refreshLeeway ?? 60_000
+	const extraOrigins = new Set(config.origins ?? [])
 	const listeners = new Set<(state: SessionState<S>) => void>()
 	const lifetime = new AbortController()
 
@@ -105,8 +145,13 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 	let renewing: Promise<boolean> | undefined
 	let timer: ReturnType<typeof setTimeout> | undefined
 	let terminated = false
+	let terminalError: ConduitError | undefined
+	let lastIdentity: string | undefined
+	/** Whether a real identity has ever been observed, so the very first load never resets by itself. */
+	let identityKnown = false
 	let context: ClientContext | undefined
 	let events: EventBus | undefined
+	let apiOrigin = ''
 
 	const publish = (next: SessionState<S>): void => {
 		state = next
@@ -143,6 +188,14 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 		timer = setTimeout(run, Math.max(0, delay))
 	}
 
+	const fire = (): void => {
+		if (renewing !== undefined) {
+			return
+		}
+
+		void reload().catch(() => {})
+	}
+
 	const schedule = (value: S | null): void => {
 		clearTimeout(timer)
 		timer = undefined
@@ -157,9 +210,20 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			return
 		}
 
-		arm(expires - Date.now() - leeway, () => {
-			void reload().catch(() => {})
-		})
+		const now = Date.now()
+		const beforeLeeway = expires - now - leeway
+
+		if (beforeLeeway > 0) {
+			arm(beforeLeeway, fire)
+
+			return
+		}
+
+		const untilExpiry = expires - now
+
+		if (untilExpiry > 0) {
+			arm(untilExpiry, fire)
+		}
 	}
 
 	const adapterContext: AdapterContext = {
@@ -183,8 +247,6 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 	}
 
 	const run = async (): Promise<S | null> => {
-		const before = state.status
-
 		publish({ ...state, status: 'loading', updatedAt: Date.now() })
 
 		try {
@@ -192,10 +254,16 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			const signedIn = value !== null
 
 			terminated = false
+			terminalError = undefined
 
-			if ((before === 'authenticated' && !signedIn) || (before === 'anonymous' && signedIn)) {
+			const identity = signedIn ? (adapter.identify?.(value) ?? DEFAULT_IDENTITY) : undefined
+
+			if (identityKnown && identity !== lastIdentity) {
 				context?.resetIdentity()
 			}
+
+			lastIdentity = identity
+			identityKnown = true
 
 			publish({
 				status: signedIn ? 'authenticated' : 'anonymous',
@@ -209,7 +277,7 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 		} catch (cause) {
 			const error = toConduitError(cause)
 
-			publish({ status: 'unknown', session: null, error, updatedAt: Date.now() })
+			publish({ status: 'error', session: state.session, error, updatedAt: Date.now() })
 
 			throw error
 		} finally {
@@ -233,19 +301,36 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 		return loading
 	}
 
-	const terminate = (error: ConduitError): void => {
+	const terminate = (cause: ConduitError): void => {
 		if (terminated) {
 			return
 		}
 
 		terminated = true
+		lastIdentity = undefined
+		identityKnown = false
 		clearTimeout(timer)
 		timer = undefined
+
+		const error = new ConduitError({
+			code: 'UNAUTHENTICATED',
+			message: cause.message,
+			...(cause.method !== undefined && { method: cause.method }),
+			...(cause.url !== undefined && { url: cause.url }),
+			...(cause.status !== undefined && { status: cause.status }),
+			owner: cause.owner,
+			headers: cause.headers,
+			body: cause.body,
+			cause,
+		})
+
+		terminalError = error
 
 		publish({ status: 'anonymous', session: null, error, updatedAt: Date.now() })
 
 		context?.abortAll('The session is gone.')
 		context?.resetIdentity()
+		adapter.onClear?.()
 		config.onUnauthenticated?.(error)
 	}
 
@@ -255,6 +340,10 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			: error.code === 'HTTP_ERROR' && error.status === UNAUTHORISED
 
 	const renew = (): Promise<boolean> => {
+		if (loading !== undefined) {
+			return loading.then(value => value !== null)
+		}
+
 		if (adapter.renew === undefined) {
 			return Promise.resolve(false)
 		}
@@ -284,9 +373,23 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 		return adapter.authorize(request, state.session) ?? request
 	}
 
+	const inScope = (request: ConduitRequest): boolean => {
+		const target = originOf(request.url)
+
+		return target === '' || target === apiOrigin || extraOrigins.has(target)
+	}
+
 	const middleware: Middleware = async (request, next) => {
 		if (request.meta[SESSION_META] === true) {
 			return next(request)
+		}
+
+		if (!inScope(request)) {
+			return next(request)
+		}
+
+		if (terminated && terminalError !== undefined) {
+			throw terminalError
 		}
 
 		if (
@@ -339,7 +442,11 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 			clearTimeout(timer)
 			timer = undefined
 			terminated = false
+			terminalError = undefined
+			lastIdentity = undefined
+			identityKnown = false
 			context?.resetIdentity()
+			adapter.onClear?.()
 			publish({ status: 'unknown', session: null, error: null, updatedAt: Date.now() })
 		},
 	}
@@ -350,6 +457,7 @@ export function session<S = unknown>(config: SessionConfig<S>): Plugin<SessionAp
 		onInit: ctx => {
 			context = ctx
 			events = ctx.events
+			apiOrigin = apiOriginFor(ctx.config.baseUrl)
 
 			if (config.eager === true) {
 				void load().catch(() => {})

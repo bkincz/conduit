@@ -185,6 +185,83 @@ describe('retry', () => {
 		expect(server.count()).toBe(2)
 	})
 
+	it('ignores an empty Retry-After rather than treating it as a zero wait', async () => {
+		let calls = 0
+		const delays: number[] = []
+		const client = createClient({
+			fetch: () => {
+				calls++
+				return Promise.resolve(
+					calls === 1
+						? new Response('', { status: 503, headers: { 'retry-after': '' } })
+						: jsonResponse({ ok: true })
+				)
+			},
+		}).with(retry({ ...fast, onRetry: info => delays.push(info.delay) }))
+
+		await expect(client.get('/x')).resolves.toEqual({ ok: true })
+
+		expect(delays[0]).toBeGreaterThan(0)
+	})
+
+	it('exposes retryAfter on the final error when the header was present', async () => {
+		const client = createClient({
+			fetch: () =>
+				Promise.resolve(
+					new Response('', { status: 503, headers: { 'retry-after': '120' } })
+				),
+		}).with(retry({ ...fast, attempts: 1 }))
+
+		const { error } = await client.get('/x').safe()
+
+		expect(error?.retryAfter).toBe(120_000)
+	})
+
+	it('does not set retryAfter when the header was absent', async () => {
+		const server = flaky(5)
+		const client = createClient({ fetch: server.fetch }).with(retry({ ...fast, attempts: 1 }))
+
+		const { error } = await client.get('/x').safe()
+
+		expect(error?.retryAfter).toBeUndefined()
+	})
+
+	it('never retries a request whose body is a consumed ReadableStream', async () => {
+		const server = flaky(5)
+		const client = createClient({ fetch: server.fetch }).with(
+			retry({ ...fast, idempotentOnly: false })
+		)
+
+		const stream = new ReadableStream({
+			start(controller) {
+				controller.enqueue(new Uint8Array([1]))
+				controller.close()
+			},
+		})
+		stream.getReader()
+
+		await client.post('/x', stream).safe()
+
+		expect(server.count()).toBe(1)
+	})
+
+	it('still retries a stream body that has not been read yet', async () => {
+		const server = flaky(1)
+		const client = createClient({ fetch: server.fetch }).with(
+			retry({ ...fast, idempotentOnly: false })
+		)
+
+		const stream = new ReadableStream({
+			start(controller) {
+				controller.enqueue(new Uint8Array([1]))
+				controller.close()
+			},
+		})
+
+		await expect(client.post('/x', stream)).resolves.toEqual({ ok: true })
+		expect(server.count()).toBe(2)
+	})
+
 	it('reports each attempt on the event stream', async () => {
 		const server = flaky(2)
 		const client = createClient({ fetch: server.fetch }).with(retry(fast))

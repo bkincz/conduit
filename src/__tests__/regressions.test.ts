@@ -125,6 +125,13 @@ describe('request identity', () => {
 			tags: [],
 			parse: 'auto',
 			credentials: undefined,
+			mode: undefined,
+			redirect: undefined,
+			cache: undefined,
+			keepalive: undefined,
+			priority: undefined,
+			referrerPolicy: undefined,
+			integrity: undefined,
 			meta: {},
 			buildHeaders: () => new Headers(),
 		})
@@ -166,7 +173,7 @@ describe('literal colons in paths', () => {
 
 	it('ignores credentials in an authority', async () => {
 		const stub = stubFetch(ok)
-		const client = createClient({ fetch: stub.fetch })
+		const client = createClient({ fetch: stub.fetch, origins: ['https://host.test'] })
 
 		await client.get('https://user:pass@host.test/x')
 
@@ -805,6 +812,13 @@ describe('bookkeeping that would otherwise grow forever', () => {
 				tags: [],
 				parse: 'auto',
 				credentials: undefined,
+				mode: undefined,
+				redirect: undefined,
+				cache: undefined,
+				keepalive: undefined,
+				priority: undefined,
+				referrerPolicy: undefined,
+				integrity: undefined,
 				meta: {},
 				buildHeaders: () => new Headers(),
 			}),

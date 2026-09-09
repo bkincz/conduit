@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { ConduitError } from '../../primitives/errors'
 import { encodeBody } from '../body'
 
 describe('encodeBody', () => {
@@ -29,5 +30,34 @@ describe('encodeBody', () => {
 		expect(encodeBody({ a: 1 })).toEqual({ body: '{"a":1}', contentType: 'application/json' })
 		expect(encodeBody([1, 2])).toEqual({ body: '[1,2]', contentType: 'application/json' })
 		expect(encodeBody(42)).toEqual({ body: '42', contentType: 'application/json' })
+	})
+
+	it('refuses a function body with CONFIG rather than a confusing JSON failure', () => {
+		expect(() => encodeBody(() => {})).toThrow(ConduitError)
+		expect(() => encodeBody(() => {})).toThrow(/function cannot be a request body/)
+	})
+
+	it('refuses a symbol body with CONFIG', () => {
+		expect(() => encodeBody(Symbol('x'))).toThrow(/symbol cannot be a request body/)
+	})
+
+	it('refuses a bigint body with CONFIG', () => {
+		expect(() => encodeBody(10n)).toThrow(/bigint cannot be a request body/)
+	})
+
+	it('refuses a circular body with CONFIG instead of letting JSON.stringify throw raw', () => {
+		const circular: Record<string, unknown> = { a: 1 }
+		circular['self'] = circular
+
+		expect(() => encodeBody(circular)).toThrow(ConduitError)
+		expect(() => encodeBody(circular)).toThrow(/could not be JSON-encoded/)
+
+		try {
+			encodeBody(circular)
+			expect.unreachable('expected encodeBody to throw')
+		} catch (error) {
+			expect((error as ConduitError).code).toBe('CONFIG')
+			expect((error as ConduitError).cause).toBeInstanceOf(Error)
+		}
 	})
 })

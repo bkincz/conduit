@@ -1,6 +1,11 @@
 import { DEV } from './dev'
 import type { ConduitError } from './errors'
-import type { ConduitRequest, ConduitResponse } from './types'
+import {
+	consoleLogger,
+	type ConduitLogger,
+	type ConduitRequest,
+	type ConduitResponse,
+} from './types'
 
 /*
  *   CLOCK
@@ -97,7 +102,7 @@ export interface QueueEnqueueEvent {
 
 export interface SessionChangeEvent {
 	readonly type: 'session:change'
-	readonly status: 'unknown' | 'loading' | 'authenticated' | 'anonymous'
+	readonly status: 'unknown' | 'loading' | 'authenticated' | 'anonymous' | 'error'
 	/** True once the session is gone and cannot be recovered here. */
 	readonly terminal: boolean
 	readonly at: number
@@ -173,9 +178,10 @@ export interface EventBus {
  ***************************************************************************************************/
 type AnyListener = (event: ConduitEvent) => void
 
-export function createEventBus(): EventBus {
-	const typed = new Map<ConduitEventType, Set<AnyListener>>()
-	const all = new Set<AnyListener>()
+export function createEventBus(logger: ConduitLogger = consoleLogger): EventBus {
+	const typed = new Map<ConduitEventType, Map<number, AnyListener>>()
+	const all = new Map<number, AnyListener>()
+	let nextId = 0
 	let count = 0
 
 	const dispatch = (listener: AnyListener, event: ConduitEvent): void => {
@@ -183,11 +189,27 @@ export function createEventBus(): EventBus {
 			listener(event)
 		} catch (error) {
 			if (DEV) {
-				console.error(
-					'[conduit] An event listener threw. The request is unaffected.',
-					error
+				logger.error(
+					`[conduit] An event listener threw. The request is unaffected. ${String(error)}`
 				)
 			}
+		}
+	}
+
+	const subscribe = (bucket: Map<number, AnyListener>, listener: AnyListener): Unsubscribe => {
+		const id = nextId++
+		bucket.set(id, listener)
+		count++
+
+		let removed = false
+
+		return () => {
+			if (removed || !bucket.delete(id)) {
+				return
+			}
+
+			removed = true
+			count--
 		}
 	}
 
@@ -203,62 +225,40 @@ export function createEventBus(): EventBus {
 			let listeners = typed.get(type)
 
 			if (listeners === undefined) {
-				listeners = new Set()
+				listeners = new Map()
 				typed.set(type, listeners)
 			}
 
-			const entry = listener as AnyListener
-			const owner = listeners
-			listeners.add(entry)
-			count++
-
-			let removed = false
-
-			return () => {
-				if (removed || typed.get(type) !== owner || !owner.delete(entry)) {
-					return
-				}
-
-				removed = true
-				count--
-			}
+			return subscribe(listeners, listener as AnyListener)
 		},
 
 		onAny(listener: AnyListener): Unsubscribe {
-			all.add(listener)
-			count++
-
-			let removed = false
-
-			return () => {
-				if (removed || !all.delete(listener)) {
-					return
-				}
-
-				removed = true
-				count--
-			}
+			return subscribe(all, listener)
 		},
 
 		emit<K extends ConduitEventType>(type: K, event: ConduitEventMap[K]): void {
 			const listeners = typed.get(type)
 
 			if (listeners !== undefined) {
-				for (const listener of [...listeners]) {
-					if (listeners.has(listener)) {
+				for (const [id, listener] of [...listeners]) {
+					if (listeners.has(id)) {
 						dispatch(listener, event)
 					}
 				}
 			}
 
-			for (const listener of [...all]) {
-				if (all.has(listener)) {
+			for (const [id, listener] of [...all]) {
+				if (all.has(id)) {
 					dispatch(listener, event)
 				}
 			}
 		},
 
 		clear(): void {
+			for (const bucket of typed.values()) {
+				bucket.clear()
+			}
+
 			typed.clear()
 			all.clear()
 			count = 0

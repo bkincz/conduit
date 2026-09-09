@@ -60,6 +60,39 @@ describe('devtools', () => {
 		expect(devtools.store.get().counters.failures).toBe(1)
 	})
 
+	it('strips query strings from urls and keys, which routinely carry tokens', async () => {
+		const server = createMockServer()
+		server.get('/search', { ok: true })
+
+		const client = createClient({ fetch: server.fetch })
+		const devtools = watch(client)
+
+		await client.get('/search', { query: { token: 'super-secret' } })
+		await tick()
+
+		const entry = devtools.store.get().entries[0]
+
+		expect(entry?.url).toBe('/search')
+		expect(entry?.key).toBe('GET /search')
+		expect(JSON.stringify(devtools.store.get())).not.toContain('super-secret')
+	})
+
+	it('never carries a header value, however a request or its failure is decorated', async () => {
+		const server = createMockServer()
+		server.get('/me', status(401))
+
+		const client = createClient({
+			fetch: server.fetch,
+			headers: { authorization: 'Bearer top-secret' },
+		})
+		const devtools = watch(client)
+
+		await client.get('/me').safe()
+		await tick()
+
+		expect(JSON.stringify(devtools.store.get())).not.toContain('top-secret')
+	})
+
 	it('says which remote issued what', async () => {
 		const server = createMockServer()
 		server.any('/*', { ok: true })

@@ -277,7 +277,7 @@ async function answer(responder: MockResponder, request: MockRequest): Promise<R
 	const result: unknown = typeof responder === 'function' ? await responder(request) : responder
 
 	if (result instanceof Response) {
-		return result
+		return result.clone()
 	}
 
 	if (result instanceof Error) {

@@ -1,3 +1,5 @@
+import { ConduitError } from '../primitives/errors'
+
 /*
  *   ENCODE
  ***************************************************************************************************/
@@ -8,6 +10,9 @@ export interface EncodedBody {
 }
 
 const EMPTY: EncodedBody = { body: null, contentType: undefined }
+
+/** Kinds that were never going to survive JSON, so trying only produces a confusing engine error. */
+const UNENCODABLE: ReadonlySet<string> = new Set(['function', 'symbol', 'bigint'])
 
 function isBodyInit(value: unknown): value is BodyInit {
 	return (
@@ -34,5 +39,21 @@ export function encodeBody(value: unknown): EncodedBody {
 		return { body: value, contentType: undefined }
 	}
 
-	return { body: JSON.stringify(value), contentType: 'application/json' }
+	if (UNENCODABLE.has(typeof value)) {
+		throw new ConduitError({
+			code: 'CONFIG',
+			message: `A ${typeof value} cannot be a request body. Pass a plain value, or something the platform already accepts.`,
+		})
+	}
+
+	try {
+		return { body: JSON.stringify(value), contentType: 'application/json' }
+	} catch (cause) {
+		throw new ConduitError({
+			code: 'CONFIG',
+			message:
+				'The request body could not be JSON-encoded. A circular reference cannot round-trip through JSON.',
+			cause,
+		})
+	}
 }

@@ -1,4 +1,6 @@
 import type { Client } from './client/core'
+import { stripQuery } from './http/url'
+import { DEV } from './primitives/dev'
 import type { ConduitErrorCode } from './primitives/errors'
 import type { ConduitEvent, Unsubscribe } from './primitives/events'
 import type { SessionStatus } from './plugins/session'
@@ -48,7 +50,10 @@ export interface DevtoolsState {
 export interface DevtoolsConfig {
 	/** How many finished requests to keep. Defaults to 100. */
 	max?: number
-	/** Hang the handle on `globalThis.__CONDUIT_DEVTOOLS__` for console access. Defaults to true. */
+	/**
+	 * Hang the handle on `globalThis.__CONDUIT_DEVTOOLS__` for console access.
+	 * Defaults to `DEV`, so a production build never exposes it unasked.
+	 */
 	expose?: boolean
 }
 
@@ -136,9 +141,9 @@ export function attachDevtools(client: Client, config: DevtoolsConfig = {}): Dev
 					entries: [
 						{
 							id,
-							key: event.request.key,
+							key: stripQuery(event.request.key),
 							method: event.request.method,
-							url: event.request.url,
+							url: stripQuery(event.request.url),
 							owner: event.request.owner,
 							lane: event.request.lane,
 							state: 'pending',
@@ -229,7 +234,7 @@ export function attachDevtools(client: Client, config: DevtoolsConfig = {}): Dev
 		},
 	}
 
-	if (config.expose !== false) {
+	if (config.expose ?? DEV) {
 		;(globalThis as DevtoolsScope)[GLOBAL_KEY] = devtools
 	}
 

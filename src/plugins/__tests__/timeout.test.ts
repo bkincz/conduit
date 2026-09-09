@@ -52,6 +52,22 @@ describe('timeout', () => {
 		await expect(client.get('/x')).resolves.toEqual({ ok: true })
 	})
 
+	it('meta.timeout: 0 disables the timeout per request, for an upload that must not be cut off', async () => {
+		vi.useFakeTimers()
+
+		const client = createClient({ fetch: hangingFetch().fetch }).with(timeout({ ms: 10_000 }))
+		const pending = client.get('/upload', { meta: { timeout: 0 } }).safe()
+
+		await vi.advanceTimersByTimeAsync(100_000)
+
+		expect(vi.getTimerCount()).toBe(0)
+
+		// Still hanging and not timed out, so we settle it so the test can end cleanly.
+		expect(await Promise.race([pending, Promise.resolve('still-pending')])).toBe(
+			'still-pending'
+		)
+	})
+
 	it('attributes the timeout to the remote that issued it', async () => {
 		vi.useFakeTimers()
 

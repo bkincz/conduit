@@ -12,6 +12,22 @@ import type {
 } from '../primitives/types'
 
 /*
+ *   EVENTS
+ ***************************************************************************************************/
+declare module '../primitives/events' {
+	interface ConduitEventMap {
+		'cache:set': CacheSetEvent
+	}
+}
+
+export interface CacheSetEvent {
+	readonly type: 'cache:set'
+	readonly key: string
+	readonly data: unknown
+	readonly at: number
+}
+
+/*
  *   CONFIG
  ***************************************************************************************************/
 export interface CacheConfig {
@@ -38,13 +54,19 @@ export interface CacheApi {
 	invalidateTag(tag: string): number
 	clearCache(): void
 	cacheSize(): number
+	/**
+	 * Writes a value directly, for an optimistic update, without a network
+	 * round trip. Also reaches any mounted `useRequest` watching the same key.
+	 * Returns the previous value, so a failed mutation can roll back to it.
+	 */
+	setData<T = unknown>(key: string, data: T | ((previous: T | undefined) => T)): T | undefined
 }
 
 const CACHEABLE: ReadonlySet<string> = new Set(['GET', 'HEAD'])
 
-const byMethod = (request: ConduitRequest): boolean => CACHEABLE.has(request.method)
+const byDefault = (request: ConduitRequest): boolean =>
+	CACHEABLE.has(request.method) || request.tags.length > 0
 
-/** Skips the cache entirely: `client.get('/x', { meta: { cache: 'bypass' } })`. */
 export const CACHE_META = 'cache'
 
 /*
@@ -102,7 +124,7 @@ function mergeTags(
 export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 	const ttl = config.ttl ?? 30_000
 	const max = config.max ?? 200
-	const shouldCache = config.shouldCache ?? byMethod
+	const shouldCache = config.shouldCache ?? byDefault
 	const staleWindow =
 		config.staleWhileRevalidate === true
 			? Number.POSITIVE_INFINITY
@@ -165,6 +187,16 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 		return entry
 	}
 
+	const enforceCap = (): void => {
+		if (entries.size > max) {
+			const oldest = entries.keys().next().value
+
+			if (oldest !== undefined) {
+				entries.delete(oldest)
+			}
+		}
+	}
+
 	const write = (
 		request: ConduitRequest,
 		response: ConduitResponse,
@@ -187,13 +219,7 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 			staleUntil: now + ttl + staleWindow,
 		})
 
-		if (entries.size > max) {
-			const oldest = entries.keys().next().value
-
-			if (oldest !== undefined) {
-				entries.delete(oldest)
-			}
-		}
+		enforceCap()
 	}
 
 	const serve = (
@@ -246,9 +272,31 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 		return true
 	}
 
+	const fetchAndStore = async (request: ConduitRequest, next: Next): Promise<ConduitResponse> => {
+		const pending = begin(request)
+
+		try {
+			const response = await next(request)
+
+			if (storable(response)) {
+				write(request, response, pending)
+			}
+
+			return response
+		} finally {
+			inFlight.delete(pending)
+		}
+	}
+
 	const middleware: Middleware = async (request, next) => {
-		if (request.meta[CACHE_META] === 'bypass' || !shouldCache(request)) {
+		const mode = request.meta[CACHE_META]
+
+		if (mode === 'bypass' || !shouldCache(request)) {
 			return next(request)
+		}
+
+		if (mode === 'refresh') {
+			return fetchAndStore(request, next)
 		}
 
 		const entry = read(request.key)
@@ -294,19 +342,7 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 			})
 		}
 
-		const pending = begin(request)
-
-		try {
-			const response = await next(request)
-
-			if (storable(response)) {
-				write(request, response, pending)
-			}
-
-			return response
-		} finally {
-			inFlight.delete(pending)
-		}
+		return fetchAndStore(request, next)
 	}
 
 	let release: (() => void) | undefined
@@ -355,6 +391,42 @@ export function cache(config: CacheConfig = {}): Plugin<CacheApi> {
 				},
 
 				cacheSize: (): number => entries.size,
+
+				setData: <T>(
+					key: string,
+					data: T | ((previous: T | undefined) => T)
+				): T | undefined => {
+					const existing = entries.get(key)
+					const previous = existing?.data as T | undefined
+					const next =
+						typeof data === 'function'
+							? (data as (previous: T | undefined) => T)(previous)
+							: data
+
+					protect(next)
+
+					entries.set(key, {
+						status: existing?.status ?? 200,
+						headers: existing?.headers ?? new Headers(),
+						data: next,
+						tags: existing?.tags ?? [],
+						freshUntil: Date.now() + ttl,
+						staleUntil: Date.now() + ttl + staleWindow,
+					})
+
+					enforceCap()
+
+					if (events?.active === true) {
+						events.emit('cache:set', {
+							type: 'cache:set',
+							key,
+							data: next,
+							at: Date.now(),
+						})
+					}
+
+					return previous
+				},
 			}
 		},
 		onDestroy: () => {
